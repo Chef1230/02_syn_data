@@ -1,0 +1,80 @@
+# SchemaBlueprint -> PhysicalSchema reference configuration.
+# Relative output paths are resolved from the 02_syn_data project directory.
+config_version: 1
+seed: 42
+
+paths:
+  schema_output_root: outputs/schema_v1_sample
+
+generation:
+  # 01_schema.sh can override these run-level values with environment vars.
+  num_schemas: 20
+  start_index: 0
+  sample_id_prefix: sample
+  progress_every: 5
+  overwrite: false
+  project_version: schema-pipeline-v1
+
+schema:
+  blueprint_id_prefix: blueprint
+  min_tables: 3
+  max_tables: 15
+
+  # Same table-count prior used by the legacy syn_data reference config.
+  # Delete both lists to use a uniform integer draw in [min_tables, max_tables].
+  table_count_values: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  table_count_weights: [0.20, 0.12, 0.16, 0.14, 0.12, 0.10, 0.06, 0.03, 0.02, 0.02, 0.015, 0.005, 0.01]
+
+  # All FK edges must satisfy parent.rank < child.rank.
+  max_rank: 3
+
+  # Extra edges are sampled only from globally legal role/rank pairs.
+  max_extra_edges: 2
+  extra_edge_probability: 0.35
+
+motifs:
+  # A positive weight enables a structural motif. Unknown names are rejected.
+  # Motif occurrences are construction-time state and are not persisted.
+  weights:
+    entity_event: 1.0
+    entity_event_detail: 1.4
+    entity_bridge_collider: 1.0
+    entity_event_fork: 1.0
+    event_reference_chain: 0.8
+    lookup_assignment: 0.8
+
+physical_design:
+  schema_id_prefix: schema
+
+  # Fallback when no table-count rule or role override matches.
+  min_feature_columns: 2
+  max_feature_columns: 6
+  feature_nullable_probability: 0.15
+  primary_key_names: [id, pk_id, row_id]
+
+  # Legacy syn_data size-aware column prior. Ranges must not overlap.
+  feature_columns_by_table_count:
+    - table_count_min: 3
+      table_count_max: 5
+      min_columns: 6
+      max_columns: 15
+    - table_count_min: 6
+      table_count_max: 8
+      min_columns: 4
+      max_columns: 10
+    - table_count_min: 9
+      table_count_max: 12
+      min_columns: 3
+      max_columns: 8
+    - table_count_min: 13
+      table_count_max: 15
+      min_columns: 2
+      max_columns: 6
+
+  # Optional role overrides have precedence over table-count rules.
+  # Valid keys are exactly: entity, event, lookup, bridge, detail.
+  feature_columns_by_role: {}
+
+# Connectivity, FK DAG, no self-loop, no parallel FK, role legality,
+# Entity/Event presence, Bridge parent count and rank order are hard schema
+# invariants. They intentionally are not configurable switches.
