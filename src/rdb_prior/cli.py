@@ -10,12 +10,23 @@ from pathlib import Path
 from typing import Sequence
 
 from rdb_prior.config import (
+    InstanceConfigOverrides,
     SchemaConfigError,
     SchemaConfigOverrides,
+    TaskConfigOverrides,
+    load_instance_pipeline_config,
     load_schema_pipeline_config,
+    load_task_pipeline_config,
+)
+from rdb_prior.observability import (
+    ProgressReporter,
+    close_logging,
+    configure_logging,
 )
 from rdb_prior.pipeline import (
+    generate_database_instances,
     generate_physical_schemas,
+    generate_tasks,
 )
 
 
@@ -71,6 +82,23 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     schema.add_argument("--blueprint-id-prefix", default=None)
     schema.add_argument("--schema-id-prefix", default=None)
+    schema.add_argument(
+        "--schema-dot",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="write one Graphviz DOT file per generated schema",
+    )
+    schema.add_argument(
+        "--schema-graph-format",
+        choices=("none", "png", "svg", "pdf"),
+        default=None,
+        help="optionally render DOT files with Graphviz",
+    )
+    schema.add_argument(
+        "--graphviz-command",
+        default=None,
+        help="Graphviz dot executable name or path",
+    )
     schema.add_argument("--progress-every", type=int, default=None)
     schema.add_argument(
         "--overwrite",
@@ -83,10 +111,91 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="validate and print resolved config without generating files",
     )
+    _add_observability_arguments(schema)
+
+    instance = subparsers.add_parser(
+        "instance",
+        help="materialize database instances from a physical schema manifest",
+    )
+    instance.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/refactor_v1.yaml"),
+    )
+    instance.add_argument("--schema-manifest", type=Path, default=None)
+    instance.add_argument("--output-dir", type=Path, default=None)
+    instance.add_argument("--count", type=int, default=None)
+    instance.add_argument("--start-index", type=int, default=None)
+    instance.add_argument("--shard-id", type=int, default=None)
+    instance.add_argument("--num-shards", type=int, default=None)
+    instance.add_argument("--progress-every", type=int, default=None)
+    instance.add_argument(
+        "--overwrite",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    instance.add_argument("--validate-config-only", action="store_true")
+    _add_observability_arguments(instance)
+
+    task = subparsers.add_parser(
+        "task",
+        help="derive supervised relational tasks from an instance manifest",
+    )
+    task.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/refactor_v1.yaml"),
+    )
+    task.add_argument("--instance-manifest", type=Path, default=None)
+    task.add_argument("--output-dir", type=Path, default=None)
+    task.add_argument(
+        "--database-count",
+        "--count",
+        dest="database_count",
+        type=int,
+        default=None,
+    )
+    task.add_argument("--tasks-per-database", type=int, default=None)
+    task.add_argument("--start-index", type=int, default=None)
+    task.add_argument("--shard-id", type=int, default=None)
+    task.add_argument("--num-shards", type=int, default=None)
+    task.add_argument("--progress-every", type=int, default=None)
+    task.add_argument(
+        "--overwrite",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    task.add_argument("--validate-config-only", action="store_true")
+    _add_observability_arguments(task)
     return parser
 
 
+def _add_observability_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--log-level",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        default="INFO",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="write timestamped logs to this file",
+    )
+    parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="show a terminal progress bar; default is auto-detect",
+    )
+    parser.add_argument("--progress-width", type=int, default=28)
+
+
 def _run_schema(args: argparse.Namespace) -> int:
+    logger = configure_logging(
+        level=args.log_level,
+        log_file=args.log_file,
+    ).getChild("schema")
     overrides = SchemaConfigOverrides(
         output_root=args.output_dir,
         num_schemas=args.count,
@@ -107,6 +216,9 @@ def _run_schema(args: argparse.Namespace) -> int:
         ),
         blueprint_id_prefix=args.blueprint_id_prefix,
         schema_id_prefix=args.schema_id_prefix,
+        write_schema_dot=args.schema_dot,
+        schema_graph_format=args.schema_graph_format,
+        graphviz_command=args.graphviz_command,
     )
     config = load_schema_pipeline_config(
         args.config,
@@ -114,6 +226,7 @@ def _run_schema(args: argparse.Namespace) -> int:
     )
 
     if args.validate_config_only:
+        logger.info("schema configuration validated: %s", args.config)
         payload = config.to_dict()
         payload["output_root"] = str(config.output_root)
         print(
@@ -124,19 +237,171 @@ def _run_schema(args: argparse.Namespace) -> int:
                 sort_keys=True,
             )
         )
+        close_logging()
         return 0
 
-    def progress(completed: int, total: int, sample_id: str) -> None:
-        print(
-            f"[schema] {completed}/{total} completed: {sample_id}",
-            flush=True,
+    reporter = ProgressReporter(
+        stage="schema",
+        total=config.num_schemas,
+        logger=logger,
+        log_every=config.progress_every,
+        enabled=args.progress,
+        width=args.progress_width,
+    )
+    try:
+        result = generate_physical_schemas(
+            config,
+            progress=lambda completed, total, sample_id: reporter.update(
+                completed,
+                total,
+                sample_id,
+            ),
         )
-
-    result = generate_physical_schemas(config, progress=progress)
+    except Exception:
+        logger.exception("schema pipeline failed")
+        raise
+    finally:
+        reporter.close()
+        close_logging()
     print(
         json.dumps(
             {
                 "generated_count": result.generated_count,
+                "dot_count": len(result.dot_paths),
+                "image_count": len(result.image_paths),
+                "output_root": str(result.output_root),
+                "manifest": str(result.manifest_path),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _run_instance(args: argparse.Namespace) -> int:
+    logger = configure_logging(
+        level=args.log_level,
+        log_file=args.log_file,
+    ).getChild("instance")
+    config = load_instance_pipeline_config(
+        args.config,
+        overrides=InstanceConfigOverrides(
+            schema_manifest=args.schema_manifest,
+            output_root=args.output_dir,
+            count=args.count,
+            start_index=args.start_index,
+            shard_id=args.shard_id,
+            num_shards=args.num_shards,
+            progress_every=args.progress_every,
+            overwrite=args.overwrite,
+        ),
+    )
+    if args.validate_config_only:
+        logger.info("instance configuration validated: %s", args.config)
+        payload = config.to_dict()
+        payload["output_root"] = str(config.output_root)
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        close_logging()
+        return 0
+
+    reporter = ProgressReporter(
+        stage="instance",
+        logger=logger,
+        log_every=config.progress_every,
+        enabled=args.progress,
+        width=args.progress_width,
+    )
+    try:
+        result = generate_database_instances(
+            config,
+            progress=lambda completed, total, sample_id: reporter.update(
+                completed,
+                total,
+                sample_id,
+            ),
+        )
+    except Exception:
+        logger.exception("instance pipeline failed")
+        raise
+    finally:
+        reporter.close()
+        close_logging()
+    print(
+        json.dumps(
+            {
+                "generated_count": result.generated_count,
+                "output_root": str(result.output_root),
+                "manifest": str(result.manifest_path),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _run_task(args: argparse.Namespace) -> int:
+    logger = configure_logging(
+        level=args.log_level,
+        log_file=args.log_file,
+    ).getChild("task")
+    config = load_task_pipeline_config(
+        args.config,
+        overrides=TaskConfigOverrides(
+            instance_manifest=args.instance_manifest,
+            output_root=args.output_dir,
+            database_count=args.database_count,
+            tasks_per_database=args.tasks_per_database,
+            start_index=args.start_index,
+            shard_id=args.shard_id,
+            num_shards=args.num_shards,
+            progress_every=args.progress_every,
+            overwrite=args.overwrite,
+        ),
+    )
+    if args.validate_config_only:
+        logger.info("task configuration validated: %s", args.config)
+        payload = config.to_dict()
+        payload["output_root"] = str(config.output_root)
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        close_logging()
+        return 0
+
+    reporter = ProgressReporter(
+        stage="task",
+        logger=logger,
+        log_every=config.progress_every,
+        enabled=args.progress,
+        width=args.progress_width,
+    )
+
+    def progress(
+        completed: int,
+        total: int,
+        sample_id: str,
+        task_count: int,
+    ) -> None:
+        reporter.update(
+            completed,
+            total,
+            sample_id,
+            detail=f"tasks={task_count}",
+        )
+
+    try:
+        result = generate_tasks(config, progress=progress)
+    except Exception:
+        logger.exception("task pipeline failed")
+        raise
+    finally:
+        reporter.close()
+        close_logging()
+    print(
+        json.dumps(
+            {
+                "database_count": result.database_count,
+                "task_count": result.task_count,
                 "output_root": str(result.output_root),
                 "manifest": str(result.manifest_path),
             },
@@ -153,6 +418,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "schema":
         try:
             return _run_schema(args)
+        except SchemaConfigError as error:
+            parser.error(str(error))
+    if args.command == "instance":
+        try:
+            return _run_instance(args)
+        except SchemaConfigError as error:
+            parser.error(str(error))
+    if args.command == "task":
+        try:
+            return _run_task(args)
         except SchemaConfigError as error:
             parser.error(str(error))
     parser.error(f"Unknown command: {args.command}")

@@ -19,6 +19,7 @@ from rdb_prior.compilation.compiler import (
 )
 from rdb_prior.compilation.model import (
     ColumnKind,
+    CompilationResult,
     PhysicalDataType,
     PhysicalSchema,
 )
@@ -101,6 +102,39 @@ class PhysicalSchemaCompilerTests(unittest.TestCase):
             schema,
             PhysicalSchema.from_dict(schema.to_dict()),
         )
+
+    def test_compilation_result_contains_identity_trace(self) -> None:
+        sample_id = "trace"
+        runtime = RuntimeContext(42).for_sample(sample_id)
+        blueprint = BlueprintSampler().sample(sample_id, runtime)
+        result = PhysicalSchemaCompiler().compile_result(
+            blueprint,
+            sample_id,
+            runtime,
+        )
+
+        self.assertEqual(
+            {node.node_id for node in blueprint.nodes},
+            set(result.trace.node_tables),
+        )
+        self.assertEqual(
+            {edge.edge_id for edge in blueprint.edges},
+            set(result.trace.edge_foreign_keys),
+        )
+        self.assertEqual(
+            result,
+            CompilationResult.from_dict(result.to_dict()),
+        )
+
+    def test_role_specific_columns_keep_anonymous_names(self) -> None:
+        _blueprint, schema = self._compile("anonymous_columns")
+        forbidden = {"event_time", "code", "label", "position"}
+        names = {
+            column.name
+            for table in schema.tables
+            for column in table.columns
+        }
+        self.assertTrue(forbidden.isdisjoint(names))
 
     def test_role_feature_rule_precedes_table_count_rule(self) -> None:
         sample_id = "feature_rules"

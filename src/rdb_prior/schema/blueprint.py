@@ -23,12 +23,12 @@ The Blueprint contains only:
 - final logical ranks;
 - stable anonymous logical FK edge IDs;
 - parent -> child logical FK topology;
+- anonymous motif occurrence provenance used by later planners;
 - schema constraints that the compiled schema must satisfy.
 
 It intentionally does not contain:
 
-- motif types, versions, occurrences, or slot bindings;
-- motif sampling weights or occurrence counts;
+- motif sampling weights;
 - domain or natural-language semantics;
 - task, process, or label-generation definitions;
 - physical table or column names;
@@ -47,7 +47,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import Mapping
+from typing import Any, Mapping
 
 from rdb_prior.schema.spec import (
     ConstraintBase,
@@ -55,6 +55,8 @@ from rdb_prior.schema.spec import (
     NodeId,
     SchemaConstraint,
     TableRole,
+    constraint_from_dict,
+    constraint_to_dict,
 )
 
 
@@ -138,6 +140,40 @@ class BlueprintEdge:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class MotifOccurrence:
+    """Anonymous construction provenance for one realized schema motif."""
+
+    occurrence_id: str
+    motif_type: str
+    node_bindings: tuple[tuple[str, NodeId], ...]
+    edge_bindings: tuple[tuple[str, EdgeId], ...]
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.occurrence_id, field_name="occurrence_id")
+        _require_identifier(self.motif_type, field_name="motif_type")
+        canonical_nodes = _canonical_bindings(
+            self.node_bindings,
+            field_name="node_bindings",
+        )
+        canonical_edges = _canonical_bindings(
+            self.edge_bindings,
+            field_name="edge_bindings",
+        )
+        if not canonical_nodes:
+            raise ValueError("node_bindings must not be empty")
+        object.__setattr__(self, "node_bindings", canonical_nodes)
+        object.__setattr__(self, "edge_bindings", canonical_edges)
+
+    @property
+    def nodes(self) -> Mapping[str, NodeId]:
+        return MappingProxyType(dict(self.node_bindings))
+
+    @property
+    def edges(self) -> Mapping[str, EdgeId]:
+        return MappingProxyType(dict(self.edge_bindings))
+
+
 # ---------------------------------------------------------------------------
 # Completed logical schema
 # ---------------------------------------------------------------------------
@@ -177,6 +213,7 @@ class SchemaBlueprint:
     nodes: tuple[BlueprintNode, ...]
     edges: tuple[BlueprintEdge, ...]
     constraints: tuple[SchemaConstraint, ...] = ()
+    motif_occurrences: tuple[MotifOccurrence, ...] = ()
 
     def __post_init__(self) -> None:
         _require_identifier(
@@ -192,6 +229,9 @@ class SchemaBlueprint:
 
         if not isinstance(self.constraints, tuple):
             raise TypeError("constraints must be a tuple")
+
+        if not isinstance(self.motif_occurrences, tuple):
+            raise TypeError("motif_occurrences must be a tuple")
 
         if not self.nodes:
             raise ValueError(
@@ -213,6 +253,12 @@ class SchemaBlueprint:
                     "instances"
                 )
 
+        for occurrence in self.motif_occurrences:
+            if not isinstance(occurrence, MotifOccurrence):
+                raise TypeError(
+                    "motif_occurrences items must be MotifOccurrence"
+                )
+
         # Canonical ordering ensures deterministic persistence and comparison.
         canonical_nodes = tuple(
             sorted(
@@ -232,6 +278,12 @@ class SchemaBlueprint:
                 key=lambda constraint: constraint.constraint_id,
             )
         )
+        canonical_occurrences = tuple(
+            sorted(
+                self.motif_occurrences,
+                key=lambda occurrence: occurrence.occurrence_id,
+            )
+        )
 
         object.__setattr__(
             self,
@@ -248,6 +300,11 @@ class SchemaBlueprint:
             "constraints",
             canonical_constraints,
         )
+        object.__setattr__(
+            self,
+            "motif_occurrences",
+            canonical_occurrences,
+        )
 
         node_ids = tuple(
             node.node_id
@@ -260,6 +317,10 @@ class SchemaBlueprint:
         constraint_ids = tuple(
             constraint.constraint_id
             for constraint in canonical_constraints
+        )
+        occurrence_ids = tuple(
+            occurrence.occurrence_id
+            for occurrence in canonical_occurrences
         )
 
         _require_unique(
@@ -274,8 +335,13 @@ class SchemaBlueprint:
             constraint_ids,
             field_name="Blueprint constraint IDs",
         )
+        _require_unique(
+            occurrence_ids,
+            field_name="Motif occurrence IDs",
+        )
 
         known_node_ids = frozenset(node_ids)
+        known_edge_ids = frozenset(edge_ids)
 
         # Referential integrity is a representation invariant rather than a
         # graph policy, so it is checked immediately.
@@ -290,6 +356,28 @@ class SchemaBlueprint:
                 raise ValueError(
                     f"Edge {edge.edge_id!r} references unknown child node "
                     f"{edge.child_node_id!r}"
+                )
+
+        for occurrence in canonical_occurrences:
+            unknown_nodes = {
+                node_id
+                for _slot, node_id in occurrence.node_bindings
+                if node_id not in known_node_ids
+            }
+            if unknown_nodes:
+                raise ValueError(
+                    f"Motif occurrence {occurrence.occurrence_id!r} binds "
+                    f"unknown nodes: {', '.join(sorted(unknown_nodes))}"
+                )
+            unknown_edges = {
+                edge_id
+                for _slot, edge_id in occurrence.edge_bindings
+                if edge_id not in known_edge_ids
+            }
+            if unknown_edges:
+                raise ValueError(
+                    f"Motif occurrence {occurrence.occurrence_id!r} binds "
+                    f"unknown edges: {', '.join(sorted(unknown_edges))}"
                 )
 
     # ------------------------------------------------------------------
@@ -342,6 +430,111 @@ class SchemaBlueprint:
                 edge.edge_id: edge
                 for edge in self.edges
             }
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the complete anonymous blueprint contract."""
+        return {
+            "blueprint_id": self.blueprint_id,
+            "nodes": [
+                {
+                    "node_id": node.node_id,
+                    "role": node.role.value,
+                    "rank": node.rank,
+                }
+                for node in self.nodes
+            ],
+            "edges": [
+                {
+                    "edge_id": edge.edge_id,
+                    "parent_node_id": edge.parent_node_id,
+                    "child_node_id": edge.child_node_id,
+                }
+                for edge in self.edges
+            ],
+            "constraints": [
+                constraint_to_dict(constraint)
+                for constraint in self.constraints
+            ],
+            "motif_occurrences": [
+                {
+                    "occurrence_id": occurrence.occurrence_id,
+                    "motif_type": occurrence.motif_type,
+                    "node_bindings": dict(occurrence.node_bindings),
+                    "edge_bindings": dict(occurrence.edge_bindings),
+                }
+                for occurrence in self.motif_occurrences
+            ],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> SchemaBlueprint:
+        """Deserialize and validate a persisted blueprint."""
+        if not isinstance(data, Mapping):
+            raise TypeError("SchemaBlueprint payload must be a mapping")
+        node_payloads = data.get("nodes")
+        edge_payloads = data.get("edges")
+        constraint_payloads = data.get("constraints", [])
+        occurrence_payloads = data.get("motif_occurrences", [])
+        for name, value in (
+            ("nodes", node_payloads),
+            ("edges", edge_payloads),
+            ("constraints", constraint_payloads),
+            ("motif_occurrences", occurrence_payloads),
+        ):
+            if not isinstance(value, list):
+                raise ValueError(f"{name} must be a list")
+
+        nodes = tuple(
+            BlueprintNode(
+                node_id=item["node_id"],
+                role=TableRole(item["role"]),
+                rank=item["rank"],
+            )
+            for item in node_payloads
+            if isinstance(item, Mapping)
+        )
+        edges = tuple(
+            BlueprintEdge(
+                edge_id=item["edge_id"],
+                parent_node_id=item["parent_node_id"],
+                child_node_id=item["child_node_id"],
+            )
+            for item in edge_payloads
+            if isinstance(item, Mapping)
+        )
+        if len(nodes) != len(node_payloads) or len(edges) != len(edge_payloads):
+            raise ValueError("node and edge payloads must be mappings")
+
+        constraints = tuple(
+            constraint_from_dict(item)
+            for item in constraint_payloads
+        )
+        occurrences: list[MotifOccurrence] = []
+        for item in occurrence_payloads:
+            if not isinstance(item, Mapping):
+                raise ValueError("motif occurrence payload must be a mapping")
+            node_bindings = item.get("node_bindings")
+            edge_bindings = item.get("edge_bindings")
+            if not isinstance(node_bindings, Mapping):
+                raise ValueError("node_bindings must be a mapping")
+            if not isinstance(edge_bindings, Mapping):
+                raise ValueError("edge_bindings must be a mapping")
+            occurrences.append(
+                MotifOccurrence(
+                    occurrence_id=item["occurrence_id"],
+                    motif_type=item["motif_type"],
+                    node_bindings=tuple(node_bindings.items()),
+                    edge_bindings=tuple(edge_bindings.items()),
+                )
+            )
+
+        return cls(
+            blueprint_id=data["blueprint_id"],
+            nodes=nodes,
+            edges=edges,
+            constraints=constraints,
+            motif_occurrences=tuple(occurrences),
         )
 
     # ------------------------------------------------------------------
@@ -544,8 +737,30 @@ def _require_unique(
         )
 
 
+def _canonical_bindings(
+    value: tuple[tuple[str, str], ...],
+    *,
+    field_name: str,
+) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, tuple):
+        raise TypeError(f"{field_name} must be a tuple")
+    keys: list[str] = []
+    results: list[tuple[str, str]] = []
+    for item in value:
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise TypeError(f"{field_name} items must be pairs")
+        key, target = item
+        _require_identifier(key, field_name=f"{field_name} key")
+        _require_identifier(target, field_name=f"{field_name} target")
+        keys.append(key)
+        results.append((key, target))
+    _require_unique(tuple(keys), field_name=f"{field_name} keys")
+    return tuple(sorted(results))
+
+
 __all__ = [
     "BlueprintNode",
     "BlueprintEdge",
+    "MotifOccurrence",
     "SchemaBlueprint",
 ]

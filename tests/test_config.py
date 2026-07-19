@@ -19,7 +19,9 @@ from rdb_prior.cli import main
 from rdb_prior.config import (
     SchemaConfigError,
     SchemaConfigOverrides,
+    TaskConfigOverrides,
     load_schema_pipeline_config,
+    load_task_pipeline_config,
 )
 
 
@@ -31,8 +33,16 @@ class SchemaConfigTests(unittest.TestCase):
 
         self.assertEqual(20, config.num_schemas)
         self.assertEqual(42, config.base_seed)
+        self.assertTrue(config.graph.write_dot)
+        self.assertIsNone(config.graph.render_format)
         self.assertEqual(tuple(range(3, 16)), config.sampler.table_count_values)
         self.assertEqual(6, len(config.sampler.motif_weights))
+        self.assertEqual(1, config.sampler.min_motif_occurrences)
+        self.assertEqual(4, config.sampler.max_motif_occurrences)
+        self.assertEqual(
+            0.35,
+            config.sampler.background_attachment_probability,
+        )
         self.assertEqual(
             4,
             len(config.compiler.feature_columns_by_table_count),
@@ -135,6 +145,8 @@ class SchemaConfigTests(unittest.TestCase):
             self.assertEqual(0, exit_code)
             summary = json.loads(stdout.getvalue().splitlines()[-1])
             self.assertEqual(2, summary["generated_count"])
+            self.assertEqual(2, summary["dot_count"])
+            self.assertEqual(0, summary["image_count"])
             manifest = json.loads(
                 (output / "manifest.json").read_text(encoding="utf-8")
             )
@@ -142,6 +154,31 @@ class SchemaConfigTests(unittest.TestCase):
             self.assertTrue(
                 all(entry["table_count"] == 3 for entry in manifest["entries"])
             )
+
+    def test_task_config_and_cli_override_tasks_per_database(self) -> None:
+        config_path = PROJECT_ROOT / "configs" / "refactor_v1.yaml"
+        config = load_task_pipeline_config(
+            config_path,
+            overrides=TaskConfigOverrides(tasks_per_database=4),
+        )
+        self.assertEqual(4, config.planner.tasks_per_database)
+        self.assertEqual(2, len(config.planner.mechanism_weights))
+
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            exit_code = main(
+                (
+                    "task",
+                    "--config",
+                    str(config_path),
+                    "--tasks-per-database",
+                    "5",
+                    "--validate-config-only",
+                )
+            )
+        self.assertEqual(0, exit_code)
+        resolved = json.loads(stdout.getvalue())
+        self.assertEqual(5, resolved["planner"]["tasks_per_database"])
 
 
 if __name__ == "__main__":

@@ -9,8 +9,8 @@ Validation is deliberately separated into four layers:
 ``role``
     Global role-edge policy and whole-node RoleSpec invariants.
 ``motif``
-    Static motif catalog checks and ephemeral construction-time attachment
-    checks.  Motif metadata is never required in a completed blueprint.
+    Static motif catalog, construction attachment and persisted provenance
+    checks.
 ``semantic``
     Evaluation of the constraint vocabulary declared in ``schema.spec`` and
     cross-reference checks for constraints evaluated at later stages.
@@ -29,6 +29,7 @@ from rdb_prior.schema.blueprint import (
     SchemaBlueprint,
 )
 from rdb_prior.schema.motifs import (
+    DEFAULT_MOTIF_LIBRARY,
     MotifIssueLevel,
     MotifLibrary,
     MotifSpec,
@@ -521,7 +522,7 @@ def validate_motif_attachment(
     *,
     existing_node_ids: Iterable[str] = (),
 ) -> tuple[ValidationIssue, ...]:
-    """Validate one ephemeral motif attachment before discarding its trace."""
+    """Validate one motif attachment against a partial or completed graph."""
     _require_blueprint(blueprint)
     if not isinstance(motif, MotifSpec):
         raise TypeError("motif must be MotifSpec")
@@ -715,6 +716,77 @@ def validate_motif_attachment(
                         f"rank {node.rank}.",
                         node_ids=(node.node_id,),
                         motif_type=motif.motif_type,
+                    )
+                )
+
+    return tuple(issues)
+
+
+def validate_motif_occurrences(
+    blueprint: SchemaBlueprint,
+    motifs: MotifLibrary = DEFAULT_MOTIF_LIBRARY,
+) -> tuple[ValidationIssue, ...]:
+    """Validate persisted motif provenance and exact edge bindings."""
+    _require_blueprint(blueprint)
+    if not isinstance(motifs, MotifLibrary):
+        raise TypeError("motifs must be MotifLibrary")
+
+    issues: list[ValidationIssue] = []
+    edges = _edge_index(blueprint)
+    for occurrence in blueprint.motif_occurrences:
+        if not motifs.contains(occurrence.motif_type):
+            issues.append(
+                _error(
+                    ValidationLayer.MOTIF,
+                    "unknown_occurrence_motif",
+                    f"Occurrence {occurrence.occurrence_id!r} references "
+                    f"unknown motif {occurrence.motif_type!r}.",
+                    motif_type=occurrence.motif_type,
+                )
+            )
+            continue
+
+        motif = motifs.get(occurrence.motif_type)
+        issues.extend(
+            validate_motif_attachment(
+                blueprint,
+                motif,
+                occurrence.nodes,
+            )
+        )
+        expected_edge_slots = {edge.edge for edge in motif.edges}
+        actual_edge_slots = set(occurrence.edges)
+        if expected_edge_slots != actual_edge_slots:
+            issues.append(
+                _error(
+                    ValidationLayer.MOTIF,
+                    "invalid_occurrence_edge_slots",
+                    f"Occurrence {occurrence.occurrence_id!r} edge slots "
+                    "do not match its motif definition.",
+                    motif_type=occurrence.motif_type,
+                )
+            )
+            continue
+
+        motif_edges = {edge.edge: edge for edge in motif.edges}
+        for edge_slot, edge_id in occurrence.edge_bindings:
+            edge = edges.get(edge_id)
+            motif_edge = motif_edges[edge_slot]
+            expected_parent = occurrence.nodes[motif_edge.parent_slot]
+            expected_child = occurrence.nodes[motif_edge.child_slot]
+            if edge is None or (
+                edge.parent_node_id != expected_parent
+                or edge.child_node_id != expected_child
+            ):
+                issues.append(
+                    _error(
+                        ValidationLayer.MOTIF,
+                        "invalid_occurrence_edge_binding",
+                        f"Occurrence {occurrence.occurrence_id!r} binds "
+                        f"edge slot {edge_slot!r} to an incompatible edge.",
+                        node_ids=(expected_parent, expected_child),
+                        edge_ids=(edge_id,),
+                        motif_type=occurrence.motif_type,
                     )
                 )
 
@@ -1423,17 +1495,21 @@ def validate_blueprint(
     blueprint: SchemaBlueprint,
     *,
     raise_on_error: bool = False,
+    motifs: MotifLibrary = DEFAULT_MOTIF_LIBRARY,
 ) -> ValidationReport:
     """Run structure, role and semantic validation for one blueprint."""
     _require_blueprint(blueprint)
     if not isinstance(raise_on_error, bool):
         raise TypeError("raise_on_error must be a boolean")
+    if not isinstance(motifs, MotifLibrary):
+        raise TypeError("motifs must be MotifLibrary")
 
     report = ValidationReport(
         blueprint_id=blueprint.blueprint_id,
         issues=(
             *validate_structure(blueprint),
             *validate_roles(blueprint),
+            *validate_motif_occurrences(blueprint, motifs),
             *validate_semantics(blueprint),
         ),
     )
@@ -1454,6 +1530,7 @@ __all__ = [
     "validate_roles",
     "validate_motif_library",
     "validate_motif_attachment",
+    "validate_motif_occurrences",
     "validate_semantics",
     "validate_blueprint",
 ]

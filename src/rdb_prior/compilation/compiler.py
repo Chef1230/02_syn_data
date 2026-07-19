@@ -9,6 +9,8 @@ import re
 
 from rdb_prior.compilation.model import (
     ColumnKind,
+    CompilationResult,
+    CompilationTrace,
     PhysicalColumn,
     PhysicalDataType,
     PhysicalForeignKey,
@@ -268,6 +270,7 @@ class PhysicalSchemaCompiler:
                 node_id=node.node_id,
                 role=node.role,
                 columns=columns,
+                runtime=runtime,
             )
             self._add_feature_columns(
                 node_id=node.node_id,
@@ -317,6 +320,28 @@ class PhysicalSchemaCompiler:
             foreign_keys=tuple(foreign_keys),
         )
 
+    def compile_result(
+        self,
+        blueprint: SchemaBlueprint,
+        sample_id: str | int,
+        runtime: RuntimeContext,
+    ) -> CompilationResult:
+        """Compile with an explicit logical-to-physical trace."""
+        schema = self.compile(blueprint, sample_id, runtime)
+        trace = CompilationTrace(
+            blueprint_id=blueprint.blueprint_id,
+            schema_id=schema.schema_id,
+            node_to_tables=tuple(
+                (node.node_id, (node.node_id,))
+                for node in blueprint.nodes
+            ),
+            edge_to_foreign_keys=tuple(
+                (edge.edge_id, (edge.edge_id,))
+                for edge in blueprint.edges
+            ),
+        )
+        return CompilationResult(schema=schema, trace=trace)
+
     @staticmethod
     def _table_names(
         blueprint: SchemaBlueprint,
@@ -351,20 +376,20 @@ class PhysicalSchemaCompiler:
             ]
         return result
 
-    @staticmethod
     def _add_role_columns(
+        self,
         *,
         node_id: str,
         role: TableRole,
         columns: list[PhysicalColumn],
+        runtime: RuntimeContext,
     ) -> None:
         specifications: tuple[
-            tuple[str, PhysicalDataType, ColumnKind, bool, bool], ...
+            tuple[PhysicalDataType, ColumnKind, bool, bool], ...
         ]
         if role is TableRole.EVENT:
             specifications = (
                 (
-                    "event_time",
                     PhysicalDataType.TIMESTAMP,
                     ColumnKind.TIME,
                     False,
@@ -374,14 +399,12 @@ class PhysicalSchemaCompiler:
         elif role is TableRole.LOOKUP:
             specifications = (
                 (
-                    "code",
                     PhysicalDataType.TEXT,
                     ColumnKind.FEATURE,
                     False,
                     True,
                 ),
                 (
-                    "label",
                     PhysicalDataType.TEXT,
                     ColumnKind.FEATURE,
                     False,
@@ -391,7 +414,6 @@ class PhysicalSchemaCompiler:
         elif role is TableRole.DETAIL:
             specifications = (
                 (
-                    "position",
                     PhysicalDataType.INTEGER,
                     ColumnKind.FEATURE,
                     False,
@@ -402,10 +424,18 @@ class PhysicalSchemaCompiler:
             specifications = ()
 
         existing_names = {column.name for column in columns}
-        for name, data_type, kind, nullable, unique in specifications:
-            if name in existing_names:
-                continue
+        for data_type, kind, nullable, unique in specifications:
             ordinal = len(columns)
+            token = runtime.uint32_seed(
+                "schema",
+                "physical",
+                "role-column",
+                node_id,
+                ordinal,
+            ) & 0xFFFF
+            name = f"c_{ordinal:03d}_{token:04x}"
+            if name in existing_names:
+                raise RuntimeError("anonymous role-column name collision")
             columns.append(
                 PhysicalColumn(
                     column_id=f"{node_id}_C{ordinal:03d}",

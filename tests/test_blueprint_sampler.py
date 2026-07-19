@@ -12,6 +12,7 @@ if str(SRC_ROOT) not in sys.path:
 
 
 from rdb_prior.runtime import RuntimeContext
+from rdb_prior.schema.blueprint import SchemaBlueprint
 from rdb_prior.schema.sampler import (
     BlueprintSampler,
     BlueprintSamplerConfig,
@@ -56,7 +57,7 @@ class BlueprintSamplerTests(unittest.TestCase):
                 )
                 self.assertTrue(validate_blueprint(blueprint).is_valid)
 
-    def test_completed_blueprint_has_no_motif_record(self) -> None:
+    def test_completed_blueprint_preserves_anonymous_motif_provenance(self) -> None:
         sampler = BlueprintSampler()
         blueprint = sampler.sample(
             "no_trace",
@@ -64,7 +65,40 @@ class BlueprintSamplerTests(unittest.TestCase):
         )
 
         self.assertFalse(hasattr(blueprint, "motifs"))
-        self.assertFalse(hasattr(blueprint, "motif_occurrences"))
+        self.assertGreaterEqual(len(blueprint.motif_occurrences), 1)
+        for occurrence in blueprint.motif_occurrences:
+            self.assertTrue(occurrence.node_bindings)
+            self.assertTrue(
+                set(occurrence.edges.values())
+                <= {edge.edge_id for edge in blueprint.edges}
+            )
+        self.assertEqual(
+            blueprint,
+            SchemaBlueprint.from_dict(blueprint.to_dict()),
+        )
+
+    def test_background_attachments_bound_motif_count(self) -> None:
+        sampler = BlueprintSampler(
+            BlueprintSamplerConfig(
+                min_tables=7,
+                max_tables=7,
+                min_motif_occurrences=1,
+                max_motif_occurrences=1,
+                background_attachment_probability=1.0,
+            )
+        )
+        blueprint = sampler.sample(
+            "background",
+            RuntimeContext(42).for_sample("background"),
+        )
+
+        self.assertEqual(1, len(blueprint.motif_occurrences))
+        motif_nodes = {
+            node_id
+            for occurrence in blueprint.motif_occurrences
+            for node_id in occurrence.nodes.values()
+        }
+        self.assertLess(len(motif_nodes), len(blueprint.nodes))
 
     def test_configuration_rejects_unknown_motif(self) -> None:
         config = BlueprintSamplerConfig(

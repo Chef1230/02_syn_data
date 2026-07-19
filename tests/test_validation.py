@@ -14,6 +14,7 @@ if str(SRC_ROOT) not in sys.path:
 from rdb_prior.schema.blueprint import (
     BlueprintEdge,
     BlueprintNode,
+    MotifOccurrence,
     SchemaBlueprint,
 )
 from rdb_prior.schema.motifs import (
@@ -48,6 +49,7 @@ from rdb_prior.schema.validation import (
     validate_blueprint,
     validate_motif_attachment,
     validate_motif_library,
+    validate_motif_occurrences,
     validate_roles,
     validate_semantics,
     validate_structure,
@@ -438,7 +440,7 @@ class MotifValidationTests(unittest.TestCase):
             validate_motif_library(DEFAULT_MOTIF_LIBRARY),
         )
 
-    def test_valid_attachment_checks_before_trace_is_discarded(self) -> None:
+    def test_valid_attachment_can_be_recorded_as_provenance(self) -> None:
         issues = validate_motif_attachment(
             self._collider_blueprint(),
             ENTITY_BRIDGE_COLLIDER,
@@ -451,6 +453,34 @@ class MotifValidationTests(unittest.TestCase):
         )
 
         self.assertEqual((), issues)
+
+    def test_occurrence_rejects_incompatible_edge_binding(self) -> None:
+        blueprint = self._collider_blueprint()
+        blueprint = SchemaBlueprint(
+            blueprint_id=blueprint.blueprint_id,
+            nodes=blueprint.nodes,
+            edges=blueprint.edges,
+            motif_occurrences=(
+                MotifOccurrence(
+                    occurrence_id="M000",
+                    motif_type="entity_bridge_collider",
+                    node_bindings=(
+                        ("left_entity", "left"),
+                        ("right_entity", "right"),
+                        ("bridge", "bridge"),
+                    ),
+                    edge_bindings=(
+                        ("left_entity_to_bridge", "right_to_bridge"),
+                        ("right_entity_to_bridge", "left_to_bridge"),
+                    ),
+                ),
+            ),
+        )
+
+        self.assertIn(
+            "invalid_occurrence_edge_binding",
+            _codes(validate_motif_occurrences(blueprint)),
+        )
 
     def test_attachment_rejects_slot_merge(self) -> None:
         issues = validate_motif_attachment(

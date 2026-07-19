@@ -602,7 +602,8 @@ def validate_motif_node_bindings(
 
     All slots must bind distinct node IDs. Only the anchor slot may reuse a
     node that already exists in the partial schema. The bindings are a
-    construction-time value and are not persisted in the completed schema.
+    construction-time rule; completed bindings may be persisted as anonymous
+    provenance after this check succeeds.
     """
     if not isinstance(motif, MotifSpec):
         raise TypeError("motif must be MotifSpec")

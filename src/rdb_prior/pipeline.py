@@ -6,24 +6,42 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+import json
+import logging
 from pathlib import Path
 import re
 from typing import Callable
 
-from rdb_prior.artifacts import SchemaArtifactWriter
-from rdb_prior.compilation.compiler import (
-    PhysicalCompilerConfig,
-    PhysicalSchemaCompiler,
+from rdb_prior.artifacts import (
+    InstanceArtifactWriter,
+    SchemaArtifactWriter,
+    load_schema_artifact,
 )
+from rdb_prior.compilation.compiler import PhysicalCompilerConfig
+from rdb_prior.extensions.defaults import default_extension_bundle
+from rdb_prior.extensions.interfaces import ExtensionBundle
+from rdb_prior.generation.database import DatabaseGenerator
+from rdb_prior.instance.planner import InstancePlanner, InstancePlannerConfig
 from rdb_prior.runtime import RuntimeContext, digest_config
-from rdb_prior.schema.sampler import (
-    BlueprintSampler,
-    BlueprintSamplerConfig,
+from rdb_prior.schema.graph import (
+    SchemaGraphArtifactWriter,
+    SchemaGraphConfig,
 )
+from rdb_prior.schema.sampler import BlueprintSamplerConfig
 from rdb_prior.schema.validation import validate_blueprint
+from rdb_prior.validation.checks import (
+    validate_database_instance,
+    validate_instance_plan,
+)
+from rdb_prior.task.pipeline import (
+    TaskPipelineConfig,
+    TaskPipelineResult,
+    generate_tasks,
+)
 
 
 _SAMPLE_PREFIX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -38,6 +56,7 @@ class SchemaPipelineConfig:
     project_version: str = "schema-pipeline-v1"
     sampler: BlueprintSamplerConfig = BlueprintSamplerConfig()
     compiler: PhysicalCompilerConfig = PhysicalCompilerConfig()
+    graph: SchemaGraphConfig = SchemaGraphConfig()
 
     def __post_init__(self) -> None:
         if not isinstance(self.output_root, Path):
@@ -71,6 +90,8 @@ class SchemaPipelineConfig:
             raise TypeError("sampler must be BlueprintSamplerConfig")
         if not isinstance(self.compiler, PhysicalCompilerConfig):
             raise TypeError("compiler must be PhysicalCompilerConfig")
+        if not isinstance(self.graph, SchemaGraphConfig):
+            raise TypeError("graph must be SchemaGraphConfig")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -94,6 +115,15 @@ class SchemaPipelineConfig:
                 "max_extra_edges": self.sampler.max_extra_edges,
                 "extra_edge_probability": (
                     self.sampler.extra_edge_probability
+                ),
+                "min_motif_occurrences": (
+                    self.sampler.min_motif_occurrences
+                ),
+                "max_motif_occurrences": (
+                    self.sampler.max_motif_occurrences
+                ),
+                "background_attachment_probability": (
+                    self.sampler.background_attachment_probability
                 ),
                 "blueprint_id_prefix": (
                     self.sampler.blueprint_id_prefix
@@ -136,11 +166,87 @@ class SchemaPipelineConfig:
                 ),
                 "schema_id_prefix": self.compiler.schema_id_prefix,
             },
+            "graph": self.graph.to_dict(),
         }
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SchemaPipelineResult:
+    output_root: Path
+    manifest_path: Path
+    artifact_paths: tuple[Path, ...]
+    dot_paths: tuple[Path, ...] = ()
+    image_paths: tuple[Path, ...] = ()
+
+    @property
+    def generated_count(self) -> int:
+        return len(self.artifact_paths)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InstancePipelineConfig:
+    schema_manifest: Path
+    output_root: Path
+    count: int | None = None
+    start_index: int = 0
+    shard_id: int = 0
+    num_shards: int = 1
+    overwrite: bool = False
+    progress_every: int = 100
+    project_version: str = "instance-pipeline-v1"
+    planner: InstancePlannerConfig = InstancePlannerConfig()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.schema_manifest, Path):
+            raise TypeError("schema_manifest must be pathlib.Path")
+        if not isinstance(self.output_root, Path):
+            raise TypeError("output_root must be pathlib.Path")
+        for name in ("start_index", "shard_id", "num_shards", "progress_every"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer")
+        if self.count is not None and (
+            isinstance(self.count, bool) or not isinstance(self.count, int)
+        ):
+            raise TypeError("count must be an integer or None")
+        if self.count is not None and self.count < 1:
+            raise ValueError("count must be positive")
+        if self.start_index < 0 or self.progress_every < 0:
+            raise ValueError("start_index and progress_every must be non-negative")
+        if self.num_shards < 1 or not 0 <= self.shard_id < self.num_shards:
+            raise ValueError("shard_id must satisfy 0 <= shard_id < num_shards")
+        if not isinstance(self.overwrite, bool):
+            raise TypeError("overwrite must be a boolean")
+        if not isinstance(self.planner, InstancePlannerConfig):
+            raise TypeError("planner must be InstancePlannerConfig")
+
+    def to_dict(self) -> dict[str, object]:
+        planner = self.planner
+        return {
+            "schema_manifest": str(self.schema_manifest),
+            "count": self.count,
+            "start_index": self.start_index,
+            "shard_id": self.shard_id,
+            "num_shards": self.num_shards,
+            "overwrite": self.overwrite,
+            "progress_every": self.progress_every,
+            "project_version": self.project_version,
+            "planner": {
+                name: getattr(planner, name)
+                for name in planner.__dataclass_fields__
+                if name != "scm_weights"
+            }
+            | {
+                "scm_weights": [
+                    [family.value, weight]
+                    for family, weight in planner.scm_weights
+                ]
+            },
+        }
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InstancePipelineResult:
     output_root: Path
     manifest_path: Path
     artifact_paths: tuple[Path, ...]
@@ -154,37 +260,74 @@ def generate_physical_schemas(
     config: SchemaPipelineConfig,
     *,
     progress: Callable[[int, int, str], None] | None = None,
+    extensions: ExtensionBundle | None = None,
 ) -> SchemaPipelineResult:
     """Generate a deterministic batch of validated physical schemas."""
     if not isinstance(config, SchemaPipelineConfig):
         raise TypeError("config must be SchemaPipelineConfig")
     if progress is not None and not callable(progress):
         raise TypeError("progress must be callable or None")
+    if extensions is not None and not isinstance(extensions, ExtensionBundle):
+        raise TypeError("extensions must be ExtensionBundle or None")
 
     configuration = config.to_dict()
     config_digest = digest_config(configuration)
     root_runtime = RuntimeContext(config.base_seed)
-    blueprint_sampler = BlueprintSampler(config.sampler)
-    compiler = PhysicalSchemaCompiler(config.compiler)
+    components = extensions or default_extension_bundle(
+        config.sampler,
+        config.compiler,
+    )
     writer = SchemaArtifactWriter(
         output_root=config.output_root,
         overwrite=config.overwrite,
     )
+    graph_writer = SchemaGraphArtifactWriter(
+        output_root=config.output_root,
+        config=config.graph,
+        overwrite=config.overwrite,
+    )
 
     paths: list[Path] = []
+    dot_paths: list[Path] = []
+    image_paths: list[Path] = []
     entries: list[dict[str, object]] = []
+    _LOGGER.info(
+        "starting schema pipeline: count=%d start_index=%d output=%s",
+        config.num_schemas,
+        config.start_index,
+        config.output_root,
+    )
 
     for offset in range(config.num_schemas):
         sample_index = config.start_index + offset
         sample_id = f"{config.sample_id_prefix}_{sample_index:06d}"
         runtime = root_runtime.for_sample(sample_id)
-        blueprint = blueprint_sampler.sample(sample_id, runtime)
+        domain = components.domain.sample(runtime.child("domain"))
+        blueprint = components.blueprint.sample(sample_id, runtime, domain)
         report = validate_blueprint(blueprint, raise_on_error=True)
-        physical_schema = compiler.compile(
+        processes = components.process.instantiate(
+            domain,
             blueprint,
+            runtime.child("process"),
+        )
+        task_plan = components.task.plan(
+            domain,
+            blueprint,
+            processes,
+            runtime.child("task"),
+        )
+        design = components.design.sample(
+            blueprint,
+            task_plan,
+            runtime.child("design"),
+        )
+        compilation = components.compiler.compile(
+            blueprint,
+            design,
             sample_id,
             runtime,
         )
+        physical_schema = compilation.schema
         runtime_record = runtime.record(
             project_version=config.project_version,
             config_digest=config_digest,
@@ -197,51 +340,226 @@ def generate_physical_schemas(
             sample_id=sample_id,
             runtime=runtime_record,
             blueprint=blueprint,
-            physical_schema=physical_schema,
+            compilation=compilation,
             report=report,
         )
+        graph_artifacts = graph_writer.commit(
+            sample_id=sample_id,
+            schema=physical_schema,
+        )
         paths.append(artifact_path)
+        if graph_artifacts.dot_path is not None:
+            dot_paths.append(graph_artifacts.dot_path)
+        if graph_artifacts.image_path is not None:
+            image_paths.append(graph_artifacts.image_path)
+        _LOGGER.debug(
+            "schema artifact committed: sample_id=%s path=%s tables=%d fks=%d",
+            sample_id,
+            artifact_path,
+            len(physical_schema.tables),
+            len(physical_schema.foreign_keys),
+        )
 
         role_counts = Counter(
             node.role.value
             for node in blueprint.nodes
         )
-        entries.append(
-            {
-                "sample_id": sample_id,
-                "artifact": artifact_path.relative_to(
-                    config.output_root
-                ).as_posix(),
-                "derived_seed": runtime.seed(),
-                "blueprint_id": blueprint.blueprint_id,
-                "physical_schema_id": physical_schema.schema_id,
-                "table_count": len(physical_schema.tables),
-                "foreign_key_count": len(
-                    physical_schema.foreign_keys
-                ),
-                "role_counts": dict(sorted(role_counts.items())),
-            }
-        )
+        entry: dict[str, object] = {
+            "sample_id": sample_id,
+            "artifact": artifact_path.relative_to(
+                config.output_root
+            ).as_posix(),
+            "derived_seed": runtime.seed(),
+            "blueprint_id": blueprint.blueprint_id,
+            "physical_schema_id": physical_schema.schema_id,
+            "table_count": len(physical_schema.tables),
+            "foreign_key_count": len(
+                physical_schema.foreign_keys
+            ),
+            "motif_counts": dict(
+                sorted(
+                    Counter(
+                        occurrence.motif_type
+                        for occurrence in blueprint.motif_occurrences
+                    ).items()
+                )
+            ),
+            "role_counts": dict(sorted(role_counts.items())),
+        }
+        graph_manifest: dict[str, Path] = {}
+        if graph_artifacts.dot_path is not None:
+            graph_manifest["dot"] = graph_artifacts.dot_path
+        if (
+            config.graph.render_format is not None
+            and graph_artifacts.image_path is not None
+        ):
+            graph_manifest[config.graph.render_format] = (
+                graph_artifacts.image_path
+            )
+        entry["graph_artifacts"] = {
+            format_name: path.relative_to(config.output_root).as_posix()
+            for format_name, path in graph_manifest.items()
+        }
+        entries.append(entry)
 
         completed = offset + 1
-        if (
-            progress is not None
-            and config.progress_every > 0
-            and (
-                completed % config.progress_every == 0
-                or completed == config.num_schemas
-            )
-        ):
+        if progress is not None:
             progress(completed, config.num_schemas, sample_id)
 
     manifest_path = writer.write_manifest(
         configuration=configuration,
         entries=entries,
     )
+    _LOGGER.info(
+        "schema pipeline complete: generated=%d manifest=%s",
+        len(paths),
+        manifest_path,
+    )
     return SchemaPipelineResult(
         output_root=config.output_root,
         manifest_path=manifest_path,
         artifact_paths=tuple(paths),
+        dot_paths=tuple(dot_paths),
+        image_paths=tuple(image_paths),
+    )
+
+
+def generate_database_instances(
+    config: InstancePipelineConfig,
+    *,
+    progress: Callable[[int, int, str], None] | None = None,
+) -> InstancePipelineResult:
+    """Materialize validated database instances from a schema manifest."""
+    if not isinstance(config, InstancePipelineConfig):
+        raise TypeError("config must be InstancePipelineConfig")
+    manifest = json.loads(config.schema_manifest.read_text(encoding="utf-8"))
+    if manifest.get("artifact_type") != "physical_schema_manifest":
+        raise ValueError("input is not a physical schema manifest")
+    if manifest.get("artifact_version") not in {None, 2}:
+        raise ValueError("unsupported physical schema manifest version")
+    entries = manifest.get("entries")
+    if not isinstance(entries, list):
+        raise ValueError("schema manifest entries must be a list")
+
+    indexed = list(enumerate(entries))[config.start_index :]
+    if config.count is not None:
+        indexed = indexed[: config.count]
+    selected = [
+        (index, entry)
+        for index, entry in indexed
+        if index % config.num_shards == config.shard_id
+    ]
+    configuration = config.to_dict()
+    config_digest = digest_config(configuration)
+    planner = InstancePlanner(config.planner)
+    generator = DatabaseGenerator()
+    writer = InstanceArtifactWriter(
+        output_root=config.output_root,
+        overwrite=config.overwrite,
+    )
+    artifact_paths: list[Path] = []
+    output_entries: list[dict[str, object]] = []
+    _LOGGER.info(
+        "starting instance pipeline: selected=%d shard=%d/%d output=%s",
+        len(selected),
+        config.shard_id,
+        config.num_shards,
+        config.output_root,
+    )
+
+    for completed, (_index, entry) in enumerate(selected, start=1):
+        if not isinstance(entry, dict):
+            raise ValueError("schema manifest entry must be an object")
+        schema_path = (config.schema_manifest.parent / entry["artifact"]).resolve()
+        artifact = load_schema_artifact(schema_path)
+        runtime = artifact.runtime.restore_context().child("database-instance")
+        schema = artifact.compilation.schema
+        plan = planner.plan(
+            sample_id=artifact.sample_id,
+            schema=schema,
+            runtime=runtime,
+        )
+        plan_report = validate_instance_plan(schema, plan)
+        if not plan_report.is_valid:
+            raise ValueError(
+                f"invalid instance plan for {artifact.sample_id}: "
+                f"{[issue.code for issue in plan_report.issues]}"
+            )
+        database = generator.generate(schema=schema, plan=plan)
+        report = validate_database_instance(schema, plan, database)
+        if not report.is_valid:
+            raise ValueError(
+                f"invalid database instance for {artifact.sample_id}: "
+                f"{[issue.code for issue in report.issues]}"
+            )
+        runtime_record = runtime.record(
+            project_version=config.project_version,
+            config_digest=config_digest,
+            metadata={
+                "stage": "database_instance",
+                "sample_id": artifact.sample_id,
+                "schema_id": schema.schema_id,
+            },
+        )
+        artifact_path = writer.commit(
+            sample_id=artifact.sample_id,
+            schema_artifact=str(schema_path),
+            runtime=runtime_record,
+            schema=schema,
+            plan=plan,
+            database=database,
+            report=report,
+        )
+        artifact_paths.append(artifact_path)
+        _LOGGER.debug(
+            "instance artifact committed: sample_id=%s path=%s tables=%d rows=%d",
+            artifact.sample_id,
+            artifact_path,
+            len(database.tables),
+            sum(table.row_count for table in database.tables),
+        )
+        output_entries.append(
+            {
+                "sample_id": artifact.sample_id,
+                "artifact": artifact_path.relative_to(config.output_root).as_posix(),
+                "schema_artifact": str(schema_path),
+                "schema_id": schema.schema_id,
+                "plan_id": plan.plan_id,
+                "table_count": len(database.tables),
+                "row_count": sum(table.row_count for table in database.tables),
+                "scm_counts": dict(
+                    sorted(
+                        Counter(
+                            table.feature_family.value for table in plan.tables
+                        ).items()
+                    )
+                ),
+            }
+        )
+        if progress is not None:
+            progress(completed, len(selected), artifact.sample_id)
+
+    manifest_path = writer.write_manifest(
+        configuration=configuration,
+        entries=output_entries,
+        filename=(
+            "manifest.json"
+            if config.num_shards == 1
+            else (
+                f"manifest.shard_{config.shard_id:05d}"
+                f"_of_{config.num_shards:05d}.json"
+            )
+        ),
+    )
+    _LOGGER.info(
+        "instance pipeline complete: generated=%d manifest=%s",
+        len(artifact_paths),
+        manifest_path,
+    )
+    return InstancePipelineResult(
+        output_root=config.output_root,
+        manifest_path=manifest_path,
+        artifact_paths=tuple(artifact_paths),
     )
 
 
@@ -249,4 +567,10 @@ __all__ = [
     "SchemaPipelineConfig",
     "SchemaPipelineResult",
     "generate_physical_schemas",
+    "InstancePipelineConfig",
+    "InstancePipelineResult",
+    "generate_database_instances",
+    "TaskPipelineConfig",
+    "TaskPipelineResult",
+    "generate_tasks",
 ]

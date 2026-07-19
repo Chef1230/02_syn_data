@@ -6,44 +6,35 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import numpy as np
 from pathlib import Path
 import re
+import shutil
 from typing import Any, Iterable, Mapping
 
-from rdb_prior.compilation.model import PhysicalSchema
+from rdb_prior.compilation.model import (
+    CompilationResult,
+    CompilationTrace,
+    PhysicalSchema,
+)
 from rdb_prior.runtime import RuntimeRecord
+from rdb_prior.generation.model import DatabaseInstance, TableData
+from rdb_prior.instance.plan import InstancePlan
 from rdb_prior.schema.blueprint import SchemaBlueprint
-from rdb_prior.schema.spec import constraint_to_dict
 from rdb_prior.schema.validation import ValidationReport
+from rdb_prior.schema.validation import (
+    ValidationIssue,
+    ValidationLayer,
+    ValidationLevel,
+)
+from rdb_prior.validation.checks import InstanceValidationReport
 
 
 _ARTIFACT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 def blueprint_to_dict(blueprint: SchemaBlueprint) -> dict[str, Any]:
-    return {
-        "blueprint_id": blueprint.blueprint_id,
-        "nodes": [
-            {
-                "node_id": node.node_id,
-                "role": node.role.value,
-                "rank": node.rank,
-            }
-            for node in blueprint.nodes
-        ],
-        "edges": [
-            {
-                "edge_id": edge.edge_id,
-                "parent_node_id": edge.parent_node_id,
-                "child_node_id": edge.child_node_id,
-            }
-            for edge in blueprint.edges
-        ],
-        "constraints": [
-            constraint_to_dict(constraint)
-            for constraint in blueprint.constraints
-        ],
-    }
+    return blueprint.to_dict()
 
 
 def validation_report_to_dict(
@@ -93,7 +84,7 @@ class SchemaArtifactWriter:
         sample_id: str,
         runtime: RuntimeRecord,
         blueprint: SchemaBlueprint,
-        physical_schema: PhysicalSchema,
+        compilation: CompilationResult,
         report: ValidationReport,
     ) -> Path:
         if not isinstance(sample_id, str) or not _ARTIFACT_ID.fullmatch(
@@ -104,8 +95,8 @@ class SchemaArtifactWriter:
             raise TypeError("runtime must be RuntimeRecord")
         if not isinstance(blueprint, SchemaBlueprint):
             raise TypeError("blueprint must be SchemaBlueprint")
-        if not isinstance(physical_schema, PhysicalSchema):
-            raise TypeError("physical_schema must be PhysicalSchema")
+        if not isinstance(compilation, CompilationResult):
+            raise TypeError("compilation must be CompilationResult")
         if not isinstance(report, ValidationReport):
             raise TypeError("report must be ValidationReport")
         if not report.is_valid:
@@ -114,10 +105,12 @@ class SchemaArtifactWriter:
         output_path = self.schema_directory / f"{sample_id}.json"
         payload = {
             "artifact_type": "physical_schema",
+            "artifact_version": 2,
             "sample_id": sample_id,
             "runtime": runtime.to_dict(),
             "blueprint": blueprint_to_dict(blueprint),
-            "physical_schema": physical_schema.to_dict(),
+            "physical_schema": compilation.schema.to_dict(),
+            "compilation_trace": compilation.trace.to_dict(),
             "validation": validation_report_to_dict(report),
         }
         self._write_json(output_path, payload)
@@ -132,6 +125,7 @@ class SchemaArtifactWriter:
         manifest_path = self.output_root / "manifest.json"
         payload = {
             "artifact_type": "physical_schema_manifest",
+            "artifact_version": 2,
             "configuration": dict(configuration),
             "entries": [dict(entry) for entry in entries],
         }
@@ -164,8 +158,253 @@ class SchemaArtifactWriter:
         temporary_path.replace(path)
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SchemaArtifact:
+    sample_id: str
+    runtime: RuntimeRecord
+    blueprint: SchemaBlueprint
+    compilation: CompilationResult
+    validation: ValidationReport
+
+
+def load_schema_artifact(path: str | Path) -> SchemaArtifact:
+    """Load one V2 schema artifact for a later pipeline stage."""
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise ValueError("schema artifact root must be an object")
+    if payload.get("artifact_type") != "physical_schema":
+        raise ValueError("unsupported schema artifact type")
+    if payload.get("artifact_version") != 2:
+        raise ValueError("unsupported schema artifact version")
+
+    blueprint = SchemaBlueprint.from_dict(payload["blueprint"])
+    schema = PhysicalSchema.from_dict(payload["physical_schema"])
+    trace = CompilationTrace.from_dict(payload["compilation_trace"])
+    validation = _validation_report_from_dict(payload["validation"])
+    artifact = SchemaArtifact(
+        sample_id=payload["sample_id"],
+        runtime=RuntimeRecord.from_dict(payload["runtime"]),
+        blueprint=blueprint,
+        compilation=CompilationResult(schema=schema, trace=trace),
+        validation=validation,
+    )
+    if artifact.compilation.schema.blueprint_id != blueprint.blueprint_id:
+        raise ValueError("artifact blueprint and physical schema do not match")
+    if validation.blueprint_id != blueprint.blueprint_id:
+        raise ValueError("artifact blueprint and validation do not match")
+    return artifact
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InstanceArtifactWriter:
+    output_root: Path
+    overwrite: bool = False
+
+    @property
+    def instance_directory(self) -> Path:
+        return self.output_root / "instances"
+
+    def commit(
+        self,
+        *,
+        sample_id: str,
+        schema_artifact: str,
+        runtime: RuntimeRecord,
+        schema: PhysicalSchema,
+        plan: InstancePlan,
+        database: DatabaseInstance,
+        report: InstanceValidationReport,
+    ) -> Path:
+        if not _ARTIFACT_ID.fullmatch(sample_id):
+            raise ValueError("sample_id is not artifact-safe")
+        if not report.is_valid:
+            raise ValueError("Cannot commit an invalid database instance")
+        if schema.schema_id != plan.schema_id or schema.schema_id != database.schema_id:
+            raise ValueError("schema, plan and database identity mismatch")
+
+        target = self.instance_directory / sample_id
+        temporary = self.instance_directory / f".{sample_id}.tmp"
+        self.instance_directory.mkdir(parents=True, exist_ok=True)
+        if target.exists() and not self.overwrite:
+            raise FileExistsError(
+                f"Artifact already exists: {target}; use overwrite=True"
+            )
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        temporary.mkdir()
+        try:
+            _write_json_file(temporary / "instance_plan.json", plan.to_dict())
+            _write_json_file(temporary / "runtime.json", runtime.to_dict())
+            _write_json_file(temporary / "validation.json", report.to_dict())
+            table_entries: list[dict[str, Any]] = []
+            tables_directory = temporary / "tables"
+            tables_directory.mkdir()
+            for physical_table in schema.tables:
+                table = database.table(physical_table.table_id)
+                filename = f"{physical_table.name}.npz"
+                table_path = tables_directory / filename
+                with table_path.open("wb") as handle:
+                    np.savez_compressed(handle, **dict(table.columns))
+                table_entries.append(
+                    {
+                        "table_id": table.table_id,
+                        "physical_name": physical_table.name,
+                        "artifact": f"tables/{filename}",
+                        "row_count": table.row_count,
+                        "column_ids": list(table.columns),
+                    }
+                )
+            _write_json_file(
+                temporary / "artifact.json",
+                {
+                    "artifact_type": "database_instance",
+                    "artifact_version": 1,
+                    "sample_id": sample_id,
+                    "instance_id": database.instance_id,
+                    "schema_id": schema.schema_id,
+                    "plan_id": plan.plan_id,
+                    "schema_artifact": schema_artifact,
+                    "plan": "instance_plan.json",
+                    "runtime": "runtime.json",
+                    "validation": "validation.json",
+                    "tables": table_entries,
+                },
+            )
+            if target.exists():
+                shutil.rmtree(target)
+            temporary.replace(target)
+        except Exception:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+            raise
+        return target / "artifact.json"
+
+    def write_manifest(
+        self,
+        *,
+        configuration: Mapping[str, Any],
+        entries: Iterable[Mapping[str, Any]],
+        filename: str = "manifest.json",
+    ) -> Path:
+        if not _ARTIFACT_ID.fullmatch(filename) or not filename.endswith(".json"):
+            raise ValueError("manifest filename is not artifact-safe JSON")
+        path = self.output_root / filename
+        if path.exists() and not self.overwrite:
+            raise FileExistsError(
+                f"Manifest already exists: {path}; use overwrite=True"
+            )
+        _write_json_file(
+            path,
+            {
+                "artifact_type": "database_instance_manifest",
+                "artifact_version": 1,
+                "configuration": dict(configuration),
+                "entries": [dict(entry) for entry in entries],
+            },
+        )
+        return path
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InstanceArtifact:
+    sample_id: str
+    schema_artifact: str
+    runtime: RuntimeRecord
+    plan: InstancePlan
+    database: DatabaseInstance
+    validation: InstanceValidationReport
+
+
+def load_instance_artifact(path: str | Path) -> InstanceArtifact:
+    manifest_path = Path(path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if payload.get("artifact_type") != "database_instance":
+        raise ValueError("unsupported instance artifact type")
+    if payload.get("artifact_version") != 1:
+        raise ValueError("unsupported instance artifact version")
+    root = manifest_path.parent
+    plan = InstancePlan.from_dict(
+        json.loads((root / payload["plan"]).read_text(encoding="utf-8"))
+    )
+    runtime = RuntimeRecord.from_dict(
+        json.loads((root / payload["runtime"]).read_text(encoding="utf-8"))
+    )
+    validation = InstanceValidationReport.from_dict(
+        json.loads((root / payload["validation"]).read_text(encoding="utf-8"))
+    )
+    tables: list[TableData] = []
+    for entry in payload["tables"]:
+        with np.load(root / entry["artifact"], allow_pickle=False) as archive:
+            columns = {column_id: archive[column_id] for column_id in archive.files}
+        tables.append(TableData(table_id=entry["table_id"], columns=columns))
+    database = DatabaseInstance(
+        instance_id=payload["instance_id"],
+        schema_id=payload["schema_id"],
+        plan_id=payload["plan_id"],
+        tables=tuple(tables),
+    )
+    return InstanceArtifact(
+        sample_id=payload["sample_id"],
+        schema_artifact=payload["schema_artifact"],
+        runtime=runtime,
+        plan=plan,
+        database=database,
+        validation=validation,
+    )
+
+
+def _write_json_file(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _validation_report_from_dict(data: Mapping[str, Any]) -> ValidationReport:
+    if not isinstance(data, Mapping):
+        raise TypeError("validation payload must be a mapping")
+    issue_payloads = data.get("issues")
+    if not isinstance(issue_payloads, list):
+        raise ValueError("validation issues must be a list")
+    issues: list[ValidationIssue] = []
+    for item in issue_payloads:
+        if not isinstance(item, Mapping):
+            raise ValueError("validation issue must be an object")
+        issues.append(
+            ValidationIssue(
+                layer=ValidationLayer(item["layer"]),
+                level=ValidationLevel(item["level"]),
+                code=item["code"],
+                message=item["message"],
+                node_ids=tuple(item.get("node_ids", ())),
+                edge_ids=tuple(item.get("edge_ids", ())),
+                constraint_id=item.get("constraint_id"),
+                motif_type=item.get("motif_type"),
+            )
+        )
+    return ValidationReport(
+        blueprint_id=data.get("blueprint_id"),
+        issues=tuple(issues),
+    )
+
+
 __all__ = [
     "blueprint_to_dict",
     "validation_report_to_dict",
     "SchemaArtifactWriter",
+    "SchemaArtifact",
+    "load_schema_artifact",
+    "InstanceArtifactWriter",
+    "InstanceArtifact",
+    "load_instance_artifact",
 ]

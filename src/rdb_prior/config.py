@@ -18,9 +18,15 @@ from rdb_prior.compilation.compiler import (
     RoleFeatureRule,
     TableCountFeatureRule,
 )
-from rdb_prior.pipeline import SchemaPipelineConfig
+from rdb_prior.instance.plan import FeatureSCMFamily
+from rdb_prior.instance.planner import InstancePlannerConfig
+from rdb_prior.pipeline import InstancePipelineConfig, SchemaPipelineConfig
+from rdb_prior.schema.graph import SchemaGraphConfig
 from rdb_prior.schema.sampler import BlueprintSampler, BlueprintSamplerConfig
 from rdb_prior.schema.spec import TableRole
+from rdb_prior.task.model import TaskMechanism
+from rdb_prior.task.pipeline import TaskPipelineConfig
+from rdb_prior.task.planner import TaskPlannerConfig
 
 
 _CONFIG_VERSION = 1
@@ -51,6 +57,34 @@ class SchemaConfigOverrides:
     feature_nullable_probability: float | None = None
     blueprint_id_prefix: str | None = None
     schema_id_prefix: str | None = None
+    write_schema_dot: bool | None = None
+    schema_graph_format: str | None = None
+    graphviz_command: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InstanceConfigOverrides:
+    schema_manifest: Path | None = None
+    output_root: Path | None = None
+    count: int | None = None
+    start_index: int | None = None
+    shard_id: int | None = None
+    num_shards: int | None = None
+    progress_every: int | None = None
+    overwrite: bool | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TaskConfigOverrides:
+    instance_manifest: Path | None = None
+    output_root: Path | None = None
+    database_count: int | None = None
+    tasks_per_database: int | None = None
+    start_index: int | None = None
+    shard_id: int | None = None
+    num_shards: int | None = None
+    progress_every: int | None = None
+    overwrite: bool | None = None
 
 
 def load_schema_pipeline_config(
@@ -70,8 +104,13 @@ def load_schema_pipeline_config(
             "paths",
             "generation",
             "schema",
+            "schema_graph",
             "motifs",
             "physical_design",
+            "instance",
+            "instance_generation",
+            "task",
+            "task_generation",
         },
         "config",
     )
@@ -88,7 +127,13 @@ def load_schema_pipeline_config(
     paths = _section(
         root,
         "paths",
-        {"schema_output_root"},
+        {
+            "schema_output_root",
+            "schema_manifest",
+            "instance_output_root",
+            "instance_manifest",
+            "task_output_root",
+        },
     )
     generation = _section(
         root,
@@ -113,7 +158,21 @@ def load_schema_pipeline_config(
             "max_rank",
             "max_extra_edges",
             "extra_edge_probability",
+            "min_motif_occurrences",
+            "max_motif_occurrences",
+            "background_attachment_probability",
             "blueprint_id_prefix",
+        },
+    )
+    schema_graph = _section(
+        root,
+        "schema_graph",
+        {
+            "write_dot",
+            "render_format",
+            "graphviz_command",
+            "include_columns",
+            "include_role_metadata",
         },
     )
     motifs = _section(root, "motifs", {"weights"})
@@ -130,6 +189,10 @@ def load_schema_pipeline_config(
             "feature_columns_by_role",
         },
     )
+    _section(root, "instance", _INSTANCE_OPTIONS)
+    _section(root, "instance_generation", _INSTANCE_GENERATION_OPTIONS)
+    _section(root, "task", _TASK_OPTIONS)
+    _section(root, "task_generation", _TASK_GENERATION_OPTIONS)
 
     cli = overrides or SchemaConfigOverrides()
     if not isinstance(cli, SchemaConfigOverrides):
@@ -137,6 +200,7 @@ def load_schema_pipeline_config(
 
     sampler_defaults = BlueprintSamplerConfig()
     compiler_defaults = PhysicalCompilerConfig()
+    graph_defaults = SchemaGraphConfig()
 
     distribution_overridden = (
         cli.min_tables is not None or cli.max_tables is not None
@@ -232,6 +296,18 @@ def load_schema_pipeline_config(
                     sampler_defaults.extra_edge_probability,
                 ),
             ),
+            min_motif_occurrences=schema.get(
+                "min_motif_occurrences",
+                sampler_defaults.min_motif_occurrences,
+            ),
+            max_motif_occurrences=schema.get(
+                "max_motif_occurrences",
+                sampler_defaults.max_motif_occurrences,
+            ),
+            background_attachment_probability=schema.get(
+                "background_attachment_probability",
+                sampler_defaults.background_attachment_probability,
+            ),
             blueprint_id_prefix=_override(
                 cli.blueprint_id_prefix,
                 schema.get(
@@ -274,6 +350,40 @@ def load_schema_pipeline_config(
                 ),
             ),
         )
+        render_format = _override(
+            cli.schema_graph_format,
+            schema_graph.get(
+                "render_format",
+                graph_defaults.render_format,
+            ),
+        )
+        if (
+            isinstance(render_format, str)
+            and render_format.strip().lower() == "none"
+        ):
+            render_format = None
+        graph = SchemaGraphConfig(
+            write_dot=_override(
+                cli.write_schema_dot,
+                schema_graph.get("write_dot", graph_defaults.write_dot),
+            ),
+            render_format=render_format,
+            graphviz_command=_override(
+                cli.graphviz_command,
+                schema_graph.get(
+                    "graphviz_command",
+                    graph_defaults.graphviz_command,
+                ),
+            ),
+            include_columns=schema_graph.get(
+                "include_columns",
+                graph_defaults.include_columns,
+            ),
+            include_role_metadata=schema_graph.get(
+                "include_role_metadata",
+                graph_defaults.include_role_metadata,
+            ),
+        )
         # Construction validates configured motif names against the active
         # library, so --validate-config-only fails before any artifact write.
         BlueprintSampler(sampler)
@@ -309,10 +419,307 @@ def load_schema_pipeline_config(
             ),
             sampler=sampler,
             compiler=compiler,
+            graph=graph,
         )
     except (TypeError, ValueError) as error:
         raise SchemaConfigError(
             f"Invalid schema pipeline config {config_path}: {error}"
+        ) from error
+
+
+_INSTANCE_OPTIONS = {
+    "entity_rows_min",
+    "entity_rows_max",
+    "lookup_rows_min",
+    "lookup_rows_max",
+    "event_fanout_min",
+    "event_fanout_max",
+    "bridge_rows_factor_min",
+    "bridge_rows_factor_max",
+    "detail_fanout_min",
+    "detail_fanout_max",
+    "entity_child_factor_min",
+    "entity_child_factor_max",
+    "max_rows_per_table",
+    "latent_dimension",
+    "optional_rate_min",
+    "optional_rate_max",
+    "affinity_strength",
+    "degree_strength",
+    "feature_missing_rate_min",
+    "feature_missing_rate_max",
+    "feature_noise_scale_min",
+    "feature_noise_scale_max",
+    "categorical_cardinality_min",
+    "categorical_cardinality_max",
+    "time_scale_seconds_min",
+    "time_scale_seconds_max",
+    "scm_weights",
+}
+
+_INSTANCE_GENERATION_OPTIONS = {
+    "count",
+    "start_index",
+    "shard_id",
+    "num_shards",
+    "progress_every",
+    "overwrite",
+    "project_version",
+}
+
+_TASK_OPTIONS = {
+    "tasks_per_database",
+    "mechanism_weights",
+    "support_fraction",
+    "min_support_rows",
+    "min_query_rows",
+    "min_class_count_per_split",
+    "max_classification_categories",
+    "cutoff_quantile_min",
+    "cutoff_quantile_max",
+    "horizon_fraction_min",
+    "horizon_fraction_max",
+    "max_attempts_per_database",
+    "require_full_task_count",
+}
+
+_TASK_GENERATION_OPTIONS = {
+    "database_count",
+    "start_index",
+    "shard_id",
+    "num_shards",
+    "progress_every",
+    "overwrite",
+    "project_version",
+}
+
+
+def load_instance_pipeline_config(
+    path: str | Path,
+    *,
+    overrides: InstanceConfigOverrides | None = None,
+) -> InstancePipelineConfig:
+    """Load and validate stage-02 instance generation configuration."""
+    config_path = Path(path).resolve()
+    # Validate the shared schema sections too: one file remains the source of
+    # truth for the staged shell pipeline.
+    load_schema_pipeline_config(config_path)
+    root = _mapping(_load_document(config_path), "config")
+    paths = _section(
+        root,
+        "paths",
+        {
+            "schema_output_root",
+            "schema_manifest",
+            "instance_output_root",
+            "instance_manifest",
+            "task_output_root",
+        },
+    )
+    instance = _section(root, "instance", _INSTANCE_OPTIONS)
+    generation = _section(
+        root,
+        "instance_generation",
+        _INSTANCE_GENERATION_OPTIONS,
+    )
+    cli = overrides or InstanceConfigOverrides()
+    if not isinstance(cli, InstanceConfigOverrides):
+        raise TypeError("overrides must be InstanceConfigOverrides or None")
+    defaults = InstancePlannerConfig()
+
+    raw_weights = instance.get("scm_weights")
+    if raw_weights is None:
+        scm_weights = defaults.scm_weights
+    else:
+        weights = _mapping(raw_weights, "config.instance.scm_weights")
+        try:
+            scm_weights = tuple(
+                (FeatureSCMFamily(name), float(weight))
+                for name, weight in sorted(weights.items())
+            )
+        except (TypeError, ValueError) as error:
+            raise SchemaConfigError(
+                f"Invalid config.instance.scm_weights: {error}"
+            ) from error
+
+    schema_output = paths.get("schema_output_root", "outputs/schema_v1")
+    schema_manifest_value = paths.get(
+        "schema_manifest",
+        str(Path(schema_output) / "manifest.json"),
+    )
+    output_value = paths.get("instance_output_root", "outputs/instance_v1")
+    if not isinstance(schema_manifest_value, (str, Path)):
+        raise SchemaConfigError("config.paths.schema_manifest must be a path string")
+    if not isinstance(output_value, (str, Path)):
+        raise SchemaConfigError(
+            "config.paths.instance_output_root must be a path string"
+        )
+
+    try:
+        planner_values = {
+            name: instance.get(name, getattr(defaults, name))
+            for name in defaults.__dataclass_fields__
+            if name != "scm_weights"
+        }
+        planner = InstancePlannerConfig(
+            **planner_values,
+            scm_weights=scm_weights,
+        )
+        return InstancePipelineConfig(
+            schema_manifest=_resolve_output_root(
+                config_path=config_path,
+                configured=Path(schema_manifest_value),
+                override=cli.schema_manifest,
+            ),
+            output_root=_resolve_output_root(
+                config_path=config_path,
+                configured=Path(output_value),
+                override=cli.output_root,
+            ),
+            count=_override(cli.count, generation.get("count")),
+            start_index=_override(
+                cli.start_index,
+                generation.get("start_index", 0),
+            ),
+            shard_id=_override(cli.shard_id, generation.get("shard_id", 0)),
+            num_shards=_override(
+                cli.num_shards,
+                generation.get("num_shards", 1),
+            ),
+            progress_every=_override(
+                cli.progress_every,
+                generation.get("progress_every", 100),
+            ),
+            overwrite=_override(
+                cli.overwrite,
+                generation.get("overwrite", False),
+            ),
+            project_version=generation.get(
+                "project_version", "instance-pipeline-v1"
+            ),
+            planner=planner,
+        )
+    except (TypeError, ValueError) as error:
+        raise SchemaConfigError(
+            f"Invalid instance pipeline config {config_path}: {error}"
+        ) from error
+
+
+def load_task_pipeline_config(
+    path: str | Path,
+    *,
+    overrides: TaskConfigOverrides | None = None,
+) -> TaskPipelineConfig:
+    """Load and validate stage-03 task generation configuration."""
+    config_path = Path(path).resolve()
+    load_instance_pipeline_config(config_path)
+    root = _mapping(_load_document(config_path), "config")
+    paths = _section(
+        root,
+        "paths",
+        {
+            "schema_output_root",
+            "schema_manifest",
+            "instance_output_root",
+            "instance_manifest",
+            "task_output_root",
+        },
+    )
+    task = _section(root, "task", _TASK_OPTIONS)
+    generation = _section(
+        root,
+        "task_generation",
+        _TASK_GENERATION_OPTIONS,
+    )
+    cli = overrides or TaskConfigOverrides()
+    if not isinstance(cli, TaskConfigOverrides):
+        raise TypeError("overrides must be TaskConfigOverrides or None")
+    defaults = TaskPlannerConfig()
+
+    raw_weights = task.get("mechanism_weights")
+    if raw_weights is None:
+        mechanism_weights = defaults.mechanism_weights
+    else:
+        weights = _mapping(raw_weights, "config.task.mechanism_weights")
+        try:
+            mechanism_weights = tuple(
+                (TaskMechanism(name), float(weight))
+                for name, weight in sorted(weights.items())
+            )
+        except (TypeError, ValueError) as error:
+            raise SchemaConfigError(
+                f"Invalid config.task.mechanism_weights: {error}"
+            ) from error
+
+    instance_output = paths.get("instance_output_root", "outputs/instance_v1")
+    manifest_value = paths.get(
+        "instance_manifest",
+        str(Path(instance_output) / "manifest.json"),
+    )
+    output_value = paths.get("task_output_root", "outputs/task_v1")
+    if not isinstance(manifest_value, (str, Path)):
+        raise SchemaConfigError(
+            "config.paths.instance_manifest must be a path string"
+        )
+    if not isinstance(output_value, (str, Path)):
+        raise SchemaConfigError(
+            "config.paths.task_output_root must be a path string"
+        )
+
+    try:
+        planner_values = {
+            name: task.get(name, getattr(defaults, name))
+            for name in defaults.__dataclass_fields__
+            if name not in {"mechanism_weights", "tasks_per_database"}
+        }
+        planner = TaskPlannerConfig(
+            **planner_values,
+            tasks_per_database=_override(
+                cli.tasks_per_database,
+                task.get("tasks_per_database", defaults.tasks_per_database),
+            ),
+            mechanism_weights=mechanism_weights,
+        )
+        return TaskPipelineConfig(
+            instance_manifest=_resolve_output_root(
+                config_path=config_path,
+                configured=Path(manifest_value),
+                override=cli.instance_manifest,
+            ),
+            output_root=_resolve_output_root(
+                config_path=config_path,
+                configured=Path(output_value),
+                override=cli.output_root,
+            ),
+            database_count=_override(
+                cli.database_count,
+                generation.get("database_count"),
+            ),
+            start_index=_override(
+                cli.start_index,
+                generation.get("start_index", 0),
+            ),
+            shard_id=_override(cli.shard_id, generation.get("shard_id", 0)),
+            num_shards=_override(
+                cli.num_shards,
+                generation.get("num_shards", 1),
+            ),
+            progress_every=_override(
+                cli.progress_every,
+                generation.get("progress_every", 100),
+            ),
+            overwrite=_override(
+                cli.overwrite,
+                generation.get("overwrite", False),
+            ),
+            project_version=generation.get(
+                "project_version", "task-pipeline-v1"
+            ),
+            planner=planner,
+        )
+    except (TypeError, ValueError) as error:
+        raise SchemaConfigError(
+            f"Invalid task pipeline config {config_path}: {error}"
         ) from error
 
 
@@ -514,5 +921,9 @@ def _override(override: Any, configured: Any) -> Any:
 __all__ = [
     "SchemaConfigError",
     "SchemaConfigOverrides",
+    "InstanceConfigOverrides",
+    "TaskConfigOverrides",
     "load_schema_pipeline_config",
+    "load_instance_pipeline_config",
+    "load_task_pipeline_config",
 ]

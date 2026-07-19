@@ -13,9 +13,13 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 
+from rdb_prior.artifacts import load_instance_artifact, load_schema_artifact
 from rdb_prior.compilation.model import PhysicalSchema
+from rdb_prior.instance.planner import InstancePlannerConfig
 from rdb_prior.pipeline import (
+    InstancePipelineConfig,
     SchemaPipelineConfig,
+    generate_database_instances,
     generate_physical_schemas,
 )
 from rdb_prior.schema.sampler import BlueprintSamplerConfig
@@ -39,24 +43,37 @@ class SchemaPipelineTests(unittest.TestCase):
             result = generate_physical_schemas(config)
 
             self.assertEqual(3, result.generated_count)
+            self.assertEqual(3, len(result.dot_paths))
+            self.assertEqual((), result.image_paths)
             self.assertTrue(result.manifest_path.is_file())
             manifest = json.loads(
                 result.manifest_path.read_text(encoding="utf-8")
             )
             self.assertEqual(3, len(manifest["entries"]))
+            for entry in manifest["entries"]:
+                graph_path = output_root / entry["graph_artifacts"]["dot"]
+                self.assertTrue(graph_path.is_file())
 
             for artifact_path in result.artifact_paths:
                 payload = json.loads(
                     artifact_path.read_text(encoding="utf-8")
                 )
                 self.assertEqual("physical_schema", payload["artifact_type"])
+                self.assertEqual(2, payload["artifact_version"])
                 self.assertTrue(payload["validation"]["is_valid"])
                 self.assertNotIn("motifs", payload["blueprint"])
-                self.assertNotIn(
+                self.assertIn(
                     "motif_occurrences",
                     payload["blueprint"],
                 )
-                PhysicalSchema.from_dict(payload["physical_schema"])
+                self.assertIn("compilation_trace", payload)
+                schema = PhysicalSchema.from_dict(payload["physical_schema"])
+                artifact = load_schema_artifact(artifact_path)
+                self.assertEqual(schema, artifact.compilation.schema)
+                self.assertEqual(
+                    artifact.blueprint.blueprint_id,
+                    artifact.compilation.trace.blueprint_id,
+                )
 
     def test_existing_artifact_requires_explicit_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -68,6 +85,76 @@ class SchemaPipelineTests(unittest.TestCase):
 
             with self.assertRaises(FileExistsError):
                 generate_physical_schemas(config)
+
+    def test_schema_to_instance_pipeline_writes_reloadable_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            schema_result = generate_physical_schemas(
+                SchemaPipelineConfig(
+                    output_root=root / "schema",
+                    num_schemas=2,
+                    base_seed=33,
+                    sampler=BlueprintSamplerConfig(min_tables=3, max_tables=4),
+                )
+            )
+            result = generate_database_instances(
+                InstancePipelineConfig(
+                    schema_manifest=schema_result.manifest_path,
+                    output_root=root / "instance",
+                    progress_every=1,
+                    planner=InstancePlannerConfig(
+                        entity_rows_min=16,
+                        entity_rows_max=20,
+                        lookup_rows_min=3,
+                        lookup_rows_max=5,
+                        max_rows_per_table=48,
+                    ),
+                )
+            )
+
+            self.assertEqual(2, result.generated_count)
+            for artifact_path in result.artifact_paths:
+                artifact = load_instance_artifact(artifact_path)
+                self.assertTrue(artifact.validation.is_valid)
+                self.assertEqual(
+                    artifact.plan.schema_id,
+                    artifact.database.schema_id,
+                )
+                self.assertTrue(artifact.database.tables)
+
+    def test_instance_shards_share_output_without_manifest_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            schema_result = generate_physical_schemas(
+                SchemaPipelineConfig(
+                    output_root=root / "schema",
+                    num_schemas=4,
+                    sampler=BlueprintSamplerConfig(min_tables=3, max_tables=3),
+                )
+            )
+            planner = InstancePlannerConfig(
+                entity_rows_min=8,
+                entity_rows_max=10,
+                lookup_rows_min=2,
+                lookup_rows_max=3,
+                max_rows_per_table=20,
+            )
+            results = [
+                generate_database_instances(
+                    InstancePipelineConfig(
+                        schema_manifest=schema_result.manifest_path,
+                        output_root=root / "instance",
+                        shard_id=shard_id,
+                        num_shards=2,
+                        planner=planner,
+                    )
+                )
+                for shard_id in range(2)
+            ]
+
+            self.assertEqual(4, sum(result.generated_count for result in results))
+            self.assertNotEqual(results[0].manifest_path, results[1].manifest_path)
+            self.assertTrue(all(result.manifest_path.is_file() for result in results))
 
 
 if __name__ == "__main__":

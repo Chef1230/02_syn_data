@@ -13,6 +13,7 @@ from rdb_prior.runtime import RuntimeContext
 from rdb_prior.schema.blueprint import (
     BlueprintEdge,
     BlueprintNode,
+    MotifOccurrence,
     SchemaBlueprint,
 )
 from rdb_prior.schema.motifs import (
@@ -64,6 +65,9 @@ class BlueprintSamplerConfig:
     max_rank: int = 3
     max_extra_edges: int = 2
     extra_edge_probability: float = 0.35
+    min_motif_occurrences: int = 1
+    max_motif_occurrences: int = 4
+    background_attachment_probability: float = 0.35
     blueprint_id_prefix: str = "blueprint"
     motif_weights: tuple[
         tuple[str, float], ...
@@ -75,6 +79,8 @@ class BlueprintSamplerConfig:
             ("max_tables", self.max_tables),
             ("max_rank", self.max_rank),
             ("max_extra_edges", self.max_extra_edges),
+            ("min_motif_occurrences", self.min_motif_occurrences),
+            ("max_motif_occurrences", self.max_motif_occurrences),
         ):
             if isinstance(value, bool) or not isinstance(value, int):
                 raise TypeError(f"{name} must be an integer")
@@ -124,6 +130,17 @@ class BlueprintSamplerConfig:
             raise ValueError("max_rank must be at least 1")
         if self.max_extra_edges < 0:
             raise ValueError("max_extra_edges must be non-negative")
+        if self.min_motif_occurrences < 1:
+            raise ValueError("min_motif_occurrences must be at least 1")
+        if self.max_motif_occurrences < self.min_motif_occurrences:
+            raise ValueError(
+                "max_motif_occurrences must be at least "
+                "min_motif_occurrences"
+            )
+        if self.min_motif_occurrences > self.min_tables - 1:
+            raise ValueError(
+                "min_motif_occurrences cannot be satisfied at min_tables"
+            )
 
         if (
             isinstance(self.extra_edge_probability, bool)
@@ -133,6 +150,19 @@ class BlueprintSamplerConfig:
         if not 0 <= self.extra_edge_probability <= 1:
             raise ValueError(
                 "extra_edge_probability must be between zero and one"
+            )
+        if (
+            isinstance(self.background_attachment_probability, bool)
+            or not isinstance(
+                self.background_attachment_probability,
+                (int, float),
+            )
+        ):
+            raise TypeError("background_attachment_probability must be numeric")
+        if not 0 <= self.background_attachment_probability <= 1:
+            raise ValueError(
+                "background_attachment_probability must be between zero "
+                "and one"
             )
 
         if (
@@ -173,6 +203,13 @@ class _AttachmentOption:
     anchor: BlueprintNode
     roles: Mapping[str, TableRole]
     ranks: Mapping[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class _BackgroundOption:
+    parent: BlueprintNode
+    child_role: TableRole
+    child_rank: int
 
 
 class BlueprintSampler:
@@ -243,8 +280,9 @@ class BlueprintSampler:
             )
         ]
         edges: list[BlueprintEdge] = []
+        motif_occurrences: list[MotifOccurrence] = []
 
-        self._attach(
+        motif_occurrences.append(self._attach(
             motif=self._base_motif,
             anchor=nodes[0],
             roles={
@@ -255,7 +293,8 @@ class BlueprintSampler:
             nodes=nodes,
             edges=edges,
             existing_node_ids=(nodes[0].node_id,),
-        )
+            occurrence_id="M000",
+        ))
 
         step = 0
         while len(nodes) < target_tables:
@@ -264,9 +303,10 @@ class BlueprintSampler:
                 nodes=tuple(nodes),
                 remaining=remaining,
             )
-            if not options_by_type:
+            background_options = self._background_options(tuple(nodes))
+            if not options_by_type and not background_options:
                 raise RuntimeError(
-                    "No feasible motif attachment can reach requested "
+                    "No feasible schema attachment can reach requested "
                     f"table count {target_tables} from {len(nodes)} nodes"
                 )
 
@@ -276,29 +316,50 @@ class BlueprintSampler:
                 "motif-step",
                 step,
             )
-            motif_types = tuple(sorted(options_by_type))
-            weights = tuple(
-                self._weights[motif_type]
-                for motif_type in motif_types
+            use_background = bool(background_options) and (
+                len(motif_occurrences)
+                >= self.config.max_motif_occurrences
+                or not options_by_type
+                or (
+                    len(motif_occurrences)
+                    >= self.config.min_motif_occurrences
+                    and step_rng.random()
+                    < self.config.background_attachment_probability
+                )
             )
-            selected_type = step_rng.choices(
-                motif_types,
-                weights=weights,
-                k=1,
-            )[0]
-            options = options_by_type[selected_type]
-            option = options[step_rng.randrange(len(options))]
-            existing_node_ids = tuple(node.node_id for node in nodes)
-
-            self._attach(
-                motif=option.motif,
-                anchor=option.anchor,
-                roles=option.roles,
-                ranks=option.ranks,
-                nodes=nodes,
-                edges=edges,
-                existing_node_ids=existing_node_ids,
-            )
+            if use_background:
+                option = background_options[
+                    step_rng.randrange(len(background_options))
+                ]
+                self._attach_background(
+                    option=option,
+                    nodes=nodes,
+                    edges=edges,
+                )
+            else:
+                motif_types = tuple(sorted(options_by_type))
+                weights = tuple(
+                    self._weights[motif_type]
+                    for motif_type in motif_types
+                )
+                selected_type = step_rng.choices(
+                    motif_types,
+                    weights=weights,
+                    k=1,
+                )[0]
+                options = options_by_type[selected_type]
+                option = options[step_rng.randrange(len(options))]
+                existing_node_ids = tuple(node.node_id for node in nodes)
+                motif_occurrences.append(self._attach(
+                    motif=option.motif,
+                    anchor=option.anchor,
+                    roles=option.roles,
+                    ranks=option.ranks,
+                    nodes=nodes,
+                    edges=edges,
+                    existing_node_ids=existing_node_ids,
+                    occurrence_id=f"M{len(motif_occurrences):03d}",
+                ))
             step += 1
 
         self._sample_extra_edges(
@@ -346,9 +407,10 @@ class BlueprintSampler:
                     minimum=1,
                 ),
             ),
+            motif_occurrences=tuple(motif_occurrences),
         )
 
-        report = validate_blueprint(blueprint)
+        report = validate_blueprint(blueprint, motifs=self.motifs)
         if not report.is_valid:
             raise BlueprintValidationError(report)
         return blueprint
@@ -474,7 +536,8 @@ class BlueprintSampler:
         nodes: list[BlueprintNode],
         edges: list[BlueprintEdge],
         existing_node_ids: tuple[str, ...],
-    ) -> None:
+        occurrence_id: str,
+    ) -> MotifOccurrence:
         bindings: dict[str, str] = {
             motif.anchor_slot: anchor.node_id,
         }
@@ -492,14 +555,15 @@ class BlueprintSampler:
             )
             bindings[node_spec.slot] = node_id
 
+        edge_bindings: dict[str, str] = {}
         for edge_spec in motif.edges:
-            edges.append(
-                BlueprintEdge(
-                    edge_id=f"E{len(edges):03d}",
-                    parent_node_id=bindings[edge_spec.parent_slot],
-                    child_node_id=bindings[edge_spec.child_slot],
-                )
+            edge = BlueprintEdge(
+                edge_id=f"E{len(edges):03d}",
+                parent_node_id=bindings[edge_spec.parent_slot],
+                child_node_id=bindings[edge_spec.child_slot],
             )
+            edges.append(edge)
+            edge_bindings[edge_spec.edge] = edge.edge_id
 
         partial = SchemaBlueprint(
             blueprint_id="partial",
@@ -525,6 +589,65 @@ class BlueprintSampler:
             raise RuntimeError(
                 f"Motif attachment {motif.motif_type!r} failed: {details}"
             )
+        return MotifOccurrence(
+            occurrence_id=occurrence_id,
+            motif_type=motif.motif_type,
+            node_bindings=tuple(bindings.items()),
+            edge_bindings=tuple(edge_bindings.items()),
+        )
+
+    def _background_options(
+        self,
+        nodes: tuple[BlueprintNode, ...],
+    ) -> tuple[_BackgroundOption, ...]:
+        options: list[_BackgroundOption] = []
+        for parent in nodes:
+            child_rank = parent.rank + 1
+            if child_rank > self.config.max_rank:
+                continue
+            for child_role in TableRole:
+                if not is_role_edge_allowed(parent.role, child_role):
+                    continue
+                rule = get_role_edge_rule(parent.role, child_role)
+                role_spec = get_role_spec(child_role)
+                structural_parent_count = int(rule.counts_as_structural_parent)
+                if structural_parent_count < role_spec.min_structural_parents:
+                    continue
+                if (
+                    role_spec.max_structural_parents is not None
+                    and structural_parent_count
+                    > role_spec.max_structural_parents
+                ):
+                    continue
+                options.append(
+                    _BackgroundOption(
+                        parent=parent,
+                        child_role=child_role,
+                        child_rank=child_rank,
+                    )
+                )
+        return tuple(options)
+
+    @staticmethod
+    def _attach_background(
+        *,
+        option: _BackgroundOption,
+        nodes: list[BlueprintNode],
+        edges: list[BlueprintEdge],
+    ) -> None:
+        node = BlueprintNode(
+            node_id=f"N{len(nodes):03d}",
+            role=option.child_role,
+            rank=option.child_rank,
+        )
+        nodes.append(node)
+        edges.append(
+            BlueprintEdge(
+                edge_id=f"E{len(edges):03d}",
+                parent_node_id=option.parent.node_id,
+                child_node_id=node.node_id,
+            )
+        )
 
     def _sample_extra_edges(
         self,

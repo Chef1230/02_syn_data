@@ -424,9 +424,159 @@ class PhysicalSchema:
         )
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CompilationTrace:
+    """Anonymous logical-to-physical identity mapping."""
+
+    blueprint_id: str
+    schema_id: str
+    node_to_tables: tuple[tuple[str, tuple[str, ...]], ...]
+    edge_to_foreign_keys: tuple[tuple[str, tuple[str, ...]], ...]
+    attribute_to_columns: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_identifier("blueprint_id", self.blueprint_id)
+        _require_identifier("schema_id", self.schema_id)
+        for field_name in (
+            "node_to_tables",
+            "edge_to_foreign_keys",
+            "attribute_to_columns",
+        ):
+            value = _canonical_trace_bindings(
+                getattr(self, field_name),
+                field_name=field_name,
+            )
+            object.__setattr__(self, field_name, value)
+
+    @property
+    def node_tables(self) -> Mapping[str, tuple[str, ...]]:
+        return MappingProxyType(dict(self.node_to_tables))
+
+    @property
+    def edge_foreign_keys(self) -> Mapping[str, tuple[str, ...]]:
+        return MappingProxyType(dict(self.edge_to_foreign_keys))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "blueprint_id": self.blueprint_id,
+            "schema_id": self.schema_id,
+            "node_to_tables": {
+                key: list(values)
+                for key, values in self.node_to_tables
+            },
+            "edge_to_foreign_keys": {
+                key: list(values)
+                for key, values in self.edge_to_foreign_keys
+            },
+            "attribute_to_columns": {
+                key: list(values)
+                for key, values in self.attribute_to_columns
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> CompilationTrace:
+        if not isinstance(data, Mapping):
+            raise TypeError("CompilationTrace payload must be a mapping")
+
+        def bindings(name: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
+            raw = data.get(name, {})
+            if not isinstance(raw, Mapping):
+                raise ValueError(f"{name} must be a mapping")
+            result: list[tuple[str, tuple[str, ...]]] = []
+            for key, values in raw.items():
+                if not isinstance(values, list):
+                    raise ValueError(f"{name}.{key} must be a list")
+                result.append((key, tuple(values)))
+            return tuple(result)
+
+        return cls(
+            blueprint_id=data["blueprint_id"],
+            schema_id=data["schema_id"],
+            node_to_tables=bindings("node_to_tables"),
+            edge_to_foreign_keys=bindings("edge_to_foreign_keys"),
+            attribute_to_columns=bindings("attribute_to_columns"),
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CompilationResult:
+    schema: PhysicalSchema
+    trace: CompilationTrace
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.schema, PhysicalSchema):
+            raise TypeError("schema must be PhysicalSchema")
+        if not isinstance(self.trace, CompilationTrace):
+            raise TypeError("trace must be CompilationTrace")
+        if self.trace.blueprint_id != self.schema.blueprint_id:
+            raise ValueError("trace blueprint_id must match schema")
+        if self.trace.schema_id != self.schema.schema_id:
+            raise ValueError("trace schema_id must match schema")
+
+        table_ids = {table.table_id for table in self.schema.tables}
+        fk_ids = {fk.foreign_key_id for fk in self.schema.foreign_keys}
+        traced_tables = {
+            table_id
+            for _node_id, values in self.trace.node_to_tables
+            for table_id in values
+        }
+        traced_fks = {
+            fk_id
+            for _edge_id, values in self.trace.edge_to_foreign_keys
+            for fk_id in values
+        }
+        if not traced_tables <= table_ids:
+            raise ValueError("trace references unknown physical tables")
+        if not traced_fks <= fk_ids:
+            raise ValueError("trace references unknown physical foreign keys")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema.to_dict(),
+            "trace": self.trace.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> CompilationResult:
+        if not isinstance(data, Mapping):
+            raise TypeError("CompilationResult payload must be a mapping")
+        return cls(
+            schema=PhysicalSchema.from_dict(data["schema"]),
+            trace=CompilationTrace.from_dict(data["trace"]),
+        )
+
+
 def _require_unique(name: str, values: tuple[Any, ...]) -> None:
     if len(set(values)) != len(values):
         raise ValueError(f"{name} must be unique")
+
+
+def _canonical_trace_bindings(
+    value: tuple[tuple[str, tuple[str, ...]], ...],
+    *,
+    field_name: str,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    if not isinstance(value, tuple):
+        raise TypeError(f"{field_name} must be a tuple")
+    keys: list[str] = []
+    result: list[tuple[str, tuple[str, ...]]] = []
+    for item in value:
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise TypeError(f"{field_name} items must be pairs")
+        key, targets = item
+        _require_identifier(f"{field_name} key", key)
+        if not isinstance(targets, tuple):
+            raise TypeError(f"{field_name} targets must be a tuple")
+        if not targets:
+            raise ValueError(f"{field_name} targets must not be empty")
+        for target in targets:
+            _require_identifier(f"{field_name} target", target)
+        _require_unique(f"{field_name} targets", targets)
+        keys.append(key)
+        result.append((key, tuple(sorted(targets))))
+    _require_unique(f"{field_name} keys", tuple(keys))
+    return tuple(sorted(result))
 
 
 __all__ = [
@@ -436,4 +586,6 @@ __all__ = [
     "PhysicalTable",
     "PhysicalForeignKey",
     "PhysicalSchema",
+    "CompilationTrace",
+    "CompilationResult",
 ]

@@ -5,6 +5,10 @@ seed: 42
 
 paths:
   schema_output_root: outputs/schema_v1_sample
+  schema_manifest: outputs/schema_v1_sample/manifest.json
+  instance_output_root: outputs/instance_v1_sample
+  instance_manifest: outputs/instance_v1_sample/manifest.json
+  task_output_root: outputs/task_v1_sample
 
 generation:
   # 01_schema.sh can override these run-level values with environment vars.
@@ -14,6 +18,15 @@ generation:
   progress_every: 5
   overwrite: false
   project_version: schema-pipeline-v1
+
+# Stage-01 diagnostic graph artifacts. DOT is dependency-free; set
+# render_format to png, svg, or pdf when Graphviz `dot` is installed.
+schema_graph:
+  write_dot: true
+  render_format: null
+  graphviz_command: dot
+  include_columns: true
+  include_role_metadata: true
 
 schema:
   blueprint_id_prefix: blueprint
@@ -32,9 +45,15 @@ schema:
   max_extra_edges: 2
   extra_edge_probability: 0.35
 
+  # Keep structural motifs local; remaining tables use legal role-aware
+  # background attachments so the entire schema is not task-shaped.
+  min_motif_occurrences: 1
+  max_motif_occurrences: 4
+  background_attachment_probability: 0.35
+
 motifs:
   # A positive weight enables a structural motif. Unknown names are rejected.
-  # Motif occurrences are construction-time state and are not persisted.
+  # Motif occurrences are persisted as generator-private provenance.
   weights:
     entity_event: 1.0
     entity_event_detail: 1.4
@@ -74,6 +93,84 @@ physical_design:
   # Optional role overrides have precedence over table-count rules.
   # Valid keys are exactly: entity, event, lookup, bridge, detail.
   feature_columns_by_role: {}
+
+# Stage 02: bind every physical schema to an executable instance plan.
+instance:
+  entity_rows_min: 128
+  entity_rows_max: 512
+  lookup_rows_min: 4
+  lookup_rows_max: 32
+  event_fanout_min: 0.75
+  event_fanout_max: 4.0
+  bridge_rows_factor_min: 0.5
+  bridge_rows_factor_max: 2.0
+  detail_fanout_min: 0.75
+  detail_fanout_max: 4.0
+  entity_child_factor_min: 0.5
+  entity_child_factor_max: 1.5
+  max_rows_per_table: 2048
+
+  # One shared latent registry drives both FK choice and feature SCMs.
+  latent_dimension: 4
+  optional_rate_min: 0.05
+  optional_rate_max: 0.25
+  affinity_strength: 1.0
+  degree_strength: 0.8
+
+  scm_weights:
+    linear: 0.35
+    cam: 0.35
+    mlp: 0.30
+  feature_missing_rate_min: 0.02
+  feature_missing_rate_max: 0.15
+  feature_noise_scale_min: 0.08
+  feature_noise_scale_max: 0.25
+  categorical_cardinality_min: 3
+  categorical_cardinality_max: 12
+  time_scale_seconds_min: 300.0
+  time_scale_seconds_max: 86400.0
+
+instance_generation:
+  # null means consume all schema-manifest entries after start_index.
+  count: null
+  start_index: 0
+  shard_id: 0
+  num_shards: 1
+  progress_every: 5
+  overwrite: false
+  project_version: instance-pipeline-v1
+
+# Stage 03: derive supervised tasks without mutating the frozen database.
+task:
+  # Exact task count requested for every selected database.
+  tasks_per_database: 2
+  mechanism_weights:
+    relation_attribute: 0.5
+    future_event_existence: 0.5
+
+  support_fraction: 0.70
+  min_support_rows: 32
+  min_query_rows: 16
+  min_class_count_per_split: 2
+  max_classification_categories: 12
+
+  # Future labels use events in (cutoff, cutoff + horizon].
+  cutoff_quantile_min: 0.45
+  cutoff_quantile_max: 0.70
+  horizon_fraction_min: 0.12
+  horizon_fraction_max: 0.30
+  max_attempts_per_database: 128
+  require_full_task_count: true
+
+task_generation:
+  # null means consume all instance-manifest entries after start_index.
+  database_count: null
+  start_index: 0
+  shard_id: 0
+  num_shards: 1
+  progress_every: 5
+  overwrite: false
+  project_version: task-pipeline-v1
 
 # Connectivity, FK DAG, no self-loop, no parallel FK, role legality,
 # Entity/Event presence, Bridge parent count and rank order are hard schema
