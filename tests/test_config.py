@@ -69,6 +69,36 @@ class SchemaConfigTests(unittest.TestCase):
             ):
                 load_schema_pipeline_config(path)
 
+    def test_nested_config_resolves_paths_from_project_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project_root = Path(temporary_directory) / "project"
+            config_directory = project_root / "configs" / "local"
+            config_directory.mkdir(parents=True)
+            path = config_directory / "local.yaml"
+            path.write_text(
+                "\n".join(
+                    (
+                        "config_version: 1",
+                        "paths:",
+                        "  schema_output_root: outputs/v1/schema",
+                        "generation:",
+                        "  num_schemas: 1",
+                        "schema:",
+                        "  min_tables: 3",
+                        "  max_tables: 3",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            config = load_schema_pipeline_config(path)
+
+            self.assertEqual(
+                (project_root / "outputs" / "v1" / "schema").resolve(),
+                config.output_root,
+            )
+
     def test_unknown_motif_is_rejected_during_config_load(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "bad_motif.yaml"
@@ -190,11 +220,21 @@ class SchemaConfigTests(unittest.TestCase):
                 task_count=7,
                 validation_fraction=0.25,
                 compress=False,
+                h5_enabled=True,
+                h5_run_dfs=False,
+                h5_total_rows=512,
             ),
         )
         self.assertEqual(7, config.task_count)
         self.assertEqual(0.25, config.validation_fraction)
         self.assertFalse(config.compress)
+        self.assertTrue(config.h5_enabled)
+        self.assertFalse(config.h5_run_dfs)
+        self.assertEqual(512, config.h5_total_rows)
+        self.assertEqual(
+            (PROJECT_ROOT.parent / "RDBPFN" / "data_preprocessing").resolve(),
+            config.rdbpfn_preprocessing_root,
+        )
 
         stdout = StringIO()
         with redirect_stdout(stdout):
@@ -206,6 +246,12 @@ class SchemaConfigTests(unittest.TestCase):
                     "--count",
                     "3",
                     "--no-compress",
+                    "--h5",
+                    "--no-h5-run-dfs",
+                    "--h5-output",
+                    str(PROJECT_ROOT / "outputs" / "test_prior.h5"),
+                    "--dfs-depth",
+                    "2",
                     "--validate-config-only",
                 )
             )
@@ -213,6 +259,13 @@ class SchemaConfigTests(unittest.TestCase):
         resolved = json.loads(stdout.getvalue())
         self.assertEqual(3, resolved["task_count"])
         self.assertFalse(resolved["compress"])
+        self.assertTrue(resolved["h5_enabled"])
+        self.assertFalse(resolved["h5_run_dfs"])
+        self.assertEqual(2, resolved["dfs_depth"])
+        self.assertEqual(
+            str((PROJECT_ROOT / "outputs" / "test_prior.h5").resolve()),
+            resolved["h5_output"],
+        )
 
 
 if __name__ == "__main__":

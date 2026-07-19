@@ -145,6 +145,31 @@ bash scripts/v1/04_rdbpfn_export.sh
 `04_rdbpfn_export.sh` also supports `START_INDEX`, `SHARD_ID`, `NUM_SHARDS`,
 `MIN_VALIDATION_ROWS`, `PROGRESS_EVERY`, `CONFIG_PATH`, `PYTHON_BIN`, and
 `VALIDATE_CONFIG_ONLY`. The direct entry point is `rdb-prior rdbpfn-export`.
+
+Optionally run RDBPFN DFS and package the processed classification tasks into
+the H5 format consumed by its pretraining dataloader:
+
+```bash
+TASK_MANIFEST=outputs/task_v1_20k/manifest.json \
+RDBPFN_OUTPUT_DIR=outputs/rdbpfn_v1_20k \
+H5_EXPORT=1 \
+RDBPFN_PREPROCESSING_DIR=../RDBPFN/data_preprocessing \
+DFS_DEPTH=1 \
+DFS_JOBS=8 \
+H5_TOTAL_ROWS=600 \
+H5_MAX_COLUMNS=60 \
+OVERWRITE=0 \
+bash scripts/v1/04_rdbpfn_export.sh
+```
+
+`OUTPUT_DIR` remains an alias for `RDBPFN_OUTPUT_DIR`. Unless `H5_OUTPUT` is
+set, the H5 file follows that directory and is written as `rdbpfn_tasks.h5`
+(with a shard suffix for sharded runs). Set `H5_RUN_DFS=0` to package an
+already existing `<RDBPFN_OUTPUT_DIR>-processed` tree. Other H5 overrides are
+`H5_SEED`; `DFS_DEPTH` accepts 1 or 2. The current RDBPFN H5 training contract
+is classification-only, so regression tasks remain available as DBB datasets
+but are reported as skipped by the H5 packer.
+
 Run all four configured stages with:
 
 ```bash
@@ -310,7 +335,14 @@ RDBPFN_OUTPUT_DIR/
       train.npz
       validation.npz
       test.npz
+  rdbpfn_tasks.h5              # present when h5_enabled/H5_EXPORT is true
 ```
+
+DFS writes relational features to the sibling directory
+`RDBPFN_OUTPUT_DIR-processed/`. H5 rows keep train+validation (support) before
+test (query), and `single_eval_pos` stores that boundary. The writer streams
+one processed task at a time, so packaging does not retain the whole corpus in
+memory.
 
 One directory is emitted per task because row visibility, cutoff time, and
 masked targets are task-specific. The exporter applies the canonical

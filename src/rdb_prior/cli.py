@@ -199,6 +199,29 @@ def _build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
     )
+    export.add_argument(
+        "--h5",
+        dest="h5_enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="run optional DFS/H5 packaging after DBB export",
+    )
+    export.add_argument("--h5-output", type=Path, default=None)
+    export.add_argument(
+        "--rdbpfn-preprocessing-root",
+        type=Path,
+        default=None,
+    )
+    export.add_argument(
+        "--h5-run-dfs",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    export.add_argument("--dfs-depth", type=int, choices=(1, 2), default=None)
+    export.add_argument("--dfs-jobs", type=int, default=None)
+    export.add_argument("--h5-total-rows", type=int, default=None)
+    export.add_argument("--h5-max-columns", type=int, default=None)
+    export.add_argument("--h5-seed", type=int, default=None)
     export.add_argument("--validate-config-only", action="store_true")
     _add_observability_arguments(export)
     return parser
@@ -465,6 +488,15 @@ def _run_rdbpfn_export(args: argparse.Namespace) -> int:
             compress=args.compress,
             progress_every=args.progress_every,
             overwrite=args.overwrite,
+            h5_enabled=args.h5_enabled,
+            h5_output=args.h5_output,
+            rdbpfn_preprocessing_root=args.rdbpfn_preprocessing_root,
+            h5_run_dfs=args.h5_run_dfs,
+            dfs_depth=args.dfs_depth,
+            dfs_jobs=args.dfs_jobs,
+            h5_total_rows=args.h5_total_rows,
+            h5_max_columns=args.h5_max_columns,
+            h5_seed=args.h5_seed,
         ),
     )
     if args.validate_config_only:
@@ -503,6 +535,21 @@ def _run_rdbpfn_export(args: argparse.Namespace) -> int:
                 "dataset_count": result.dataset_count,
                 "output_root": str(result.output_root),
                 "manifest": str(result.manifest_path),
+                "h5_output": (
+                    str(result.h5_result.output_path)
+                    if result.h5_result is not None
+                    else None
+                ),
+                "h5_task_count": (
+                    result.h5_result.task_count
+                    if result.h5_result is not None
+                    else 0
+                ),
+                "h5_skipped_task_count": (
+                    result.h5_result.skipped_task_count
+                    if result.h5_result is not None
+                    else 0
+                ),
             },
             ensure_ascii=False,
             sort_keys=True,

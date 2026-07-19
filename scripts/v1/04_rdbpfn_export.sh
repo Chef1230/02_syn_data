@@ -55,6 +55,57 @@ fi
 if [[ -n "${PROGRESS_WIDTH:-}" ]]; then
   ARGS+=(--progress-width "${PROGRESS_WIDTH}")
 fi
+if [[ -n "${H5_OUTPUT:-}" ]]; then
+  ARGS+=(--h5-output "${H5_OUTPUT}")
+fi
+if [[ -n "${RDBPFN_PREPROCESSING_DIR:-}" ]]; then
+  ARGS+=(--rdbpfn-preprocessing-root "${RDBPFN_PREPROCESSING_DIR}")
+fi
+if [[ -n "${DFS_DEPTH:-}" ]]; then
+  ARGS+=(--dfs-depth "${DFS_DEPTH}")
+fi
+if [[ -n "${DFS_JOBS:-}" ]]; then
+  ARGS+=(--dfs-jobs "${DFS_JOBS}")
+fi
+if [[ -n "${H5_TOTAL_ROWS:-}" ]]; then
+  ARGS+=(--h5-total-rows "${H5_TOTAL_ROWS}")
+fi
+if [[ -n "${H5_MAX_COLUMNS:-}" ]]; then
+  ARGS+=(--h5-max-columns "${H5_MAX_COLUMNS}")
+fi
+if [[ -n "${H5_SEED:-}" ]]; then
+  ARGS+=(--h5-seed "${H5_SEED}")
+fi
+
+case "${H5_EXPORT:-}" in
+  1|true|TRUE|yes|YES)
+    ARGS+=(--h5)
+    ;;
+  0|false|FALSE|no|NO)
+    ARGS+=(--no-h5)
+    ;;
+  "")
+    ;;
+  *)
+    echo "H5_EXPORT must be 1/0, true/false, or yes/no" >&2
+    exit 2
+    ;;
+esac
+
+case "${H5_RUN_DFS:-}" in
+  1|true|TRUE|yes|YES)
+    ARGS+=(--h5-run-dfs)
+    ;;
+  0|false|FALSE|no|NO)
+    ARGS+=(--no-h5-run-dfs)
+    ;;
+  "")
+    ;;
+  *)
+    echo "H5_RUN_DFS must be 1/0, true/false, or yes/no" >&2
+    exit 2
+    ;;
+esac
 
 case "${COMPRESS:-}" in
   1|true|TRUE|yes|YES)

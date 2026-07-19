@@ -7,7 +7,7 @@ name = "rdb-prior"
 version = "0.1.0"
 description = "Role-aware synthetic relational schema generation"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "PyYAML>=6.0"]
+dependencies = ["h5py>=3.8", "numpy>=1.24", "PyYAML>=6.0"]
 
 [project.scripts]
 rdb-prior = "rdb_prior.cli:main"

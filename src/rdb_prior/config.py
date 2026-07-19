@@ -101,6 +101,15 @@ class RDBPFNExportConfigOverrides:
     compress: bool | None = None
     progress_every: int | None = None
     overwrite: bool | None = None
+    h5_enabled: bool | None = None
+    h5_output: Path | None = None
+    rdbpfn_preprocessing_root: Path | None = None
+    h5_run_dfs: bool | None = None
+    dfs_depth: int | None = None
+    dfs_jobs: int | None = None
+    h5_total_rows: int | None = None
+    h5_max_columns: int | None = None
+    h5_seed: int | None = None
 
 
 def load_schema_pipeline_config(
@@ -524,6 +533,15 @@ _RDBPFN_EXPORT_OPTIONS = {
     "progress_every",
     "overwrite",
     "project_version",
+    "h5_enabled",
+    "h5_output",
+    "rdbpfn_preprocessing_root",
+    "h5_run_dfs",
+    "dfs_depth",
+    "dfs_jobs",
+    "h5_total_rows",
+    "h5_max_columns",
+    "h5_seed",
 }
 
 
@@ -795,11 +813,32 @@ def load_rdbpfn_export_config(
         str(Path(task_output) / "manifest.json"),
     )
     output_value = paths.get("rdbpfn_output_root", "outputs/rdbpfn_v1")
+    h5_output_value = export.get("h5_output")
+    preprocessing_value = export.get(
+        "rdbpfn_preprocessing_root",
+        "../RDBPFN/data_preprocessing",
+    )
     if not isinstance(manifest_value, (str, Path)):
         raise SchemaConfigError("config.paths.task_manifest must be a path string")
     if not isinstance(output_value, (str, Path)):
         raise SchemaConfigError(
             "config.paths.rdbpfn_output_root must be a path string"
+        )
+    if h5_output_value is not None and not isinstance(
+        h5_output_value, (str, Path)
+    ):
+        raise SchemaConfigError("config.rdbpfn_export.h5_output must be a path string")
+    if not isinstance(preprocessing_value, (str, Path)):
+        raise SchemaConfigError(
+            "config.rdbpfn_export.rdbpfn_preprocessing_root must be a path string"
+        )
+
+    resolved_h5_output = None
+    if cli.h5_output is not None or h5_output_value is not None:
+        resolved_h5_output = _resolve_output_root(
+            config_path=config_path,
+            configured=Path(h5_output_value or "."),
+            override=cli.h5_output,
         )
 
     try:
@@ -844,6 +883,31 @@ def load_rdbpfn_export_config(
             project_version=export.get(
                 "project_version", "rdbpfn-export-v1"
             ),
+            h5_enabled=_override(
+                cli.h5_enabled,
+                export.get("h5_enabled", False),
+            ),
+            h5_output=resolved_h5_output,
+            rdbpfn_preprocessing_root=_resolve_output_root(
+                config_path=config_path,
+                configured=Path(preprocessing_value),
+                override=cli.rdbpfn_preprocessing_root,
+            ),
+            h5_run_dfs=_override(
+                cli.h5_run_dfs,
+                export.get("h5_run_dfs", True),
+            ),
+            dfs_depth=_override(cli.dfs_depth, export.get("dfs_depth", 1)),
+            dfs_jobs=_override(cli.dfs_jobs, export.get("dfs_jobs", 4)),
+            h5_total_rows=_override(
+                cli.h5_total_rows,
+                export.get("h5_total_rows", 600),
+            ),
+            h5_max_columns=_override(
+                cli.h5_max_columns,
+                export.get("h5_max_columns", 60),
+            ),
+            h5_seed=_override(cli.h5_seed, export.get("h5_seed", 42)),
         )
     except (TypeError, ValueError) as error:
         raise SchemaConfigError(
@@ -1034,9 +1098,17 @@ def _resolve_output_root(
 
     if configured.is_absolute():
         return configured.resolve()
+    config_directory = next(
+        (
+            parent
+            for parent in config_path.parents
+            if parent.name == "configs"
+        ),
+        None,
+    )
     project_root = (
-        config_path.parent.parent
-        if config_path.parent.name == "configs"
+        config_directory.parent
+        if config_directory is not None
         else config_path.parent
     )
     return (project_root / configured).resolve()

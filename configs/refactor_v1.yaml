@@ -186,6 +186,17 @@ rdbpfn_export:
   progress_every: 5
   overwrite: false
   project_version: rdbpfn-export-v1
+  # H5 is built from DFS-processed task features, not directly from raw tables.
+  h5_enabled: false
+  # null follows paths.rdbpfn_output_root (including OUTPUT_DIR overrides).
+  h5_output: null
+  rdbpfn_preprocessing_root: ../RDBPFN/data_preprocessing
+  h5_run_dfs: true
+  dfs_depth: 1
+  dfs_jobs: 4
+  h5_total_rows: 600
+  h5_max_columns: 60
+  h5_seed: 42
 
 # Connectivity, FK DAG, no self-loop, no parallel FK, role legality,
 # Entity/Event presence, Bridge parent count and rank order are hard schema
