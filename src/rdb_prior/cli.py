@@ -11,13 +11,16 @@ from typing import Sequence
 
 from rdb_prior.config import (
     InstanceConfigOverrides,
+    RDBPFNExportConfigOverrides,
     SchemaConfigError,
     SchemaConfigOverrides,
     TaskConfigOverrides,
     load_instance_pipeline_config,
+    load_rdbpfn_export_config,
     load_schema_pipeline_config,
     load_task_pipeline_config,
 )
+from rdb_prior.export.pipeline import export_rdbpfn_tasks
 from rdb_prior.observability import (
     ProgressReporter,
     close_logging,
@@ -167,6 +170,37 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     task.add_argument("--validate-config-only", action="store_true")
     _add_observability_arguments(task)
+
+    export = subparsers.add_parser(
+        "rdbpfn-export",
+        help="export task artifacts as RDBPFN dbinfer_bench datasets",
+    )
+    export.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/refactor_v1.yaml"),
+    )
+    export.add_argument("--task-manifest", type=Path, default=None)
+    export.add_argument("--output-dir", type=Path, default=None)
+    export.add_argument("--count", dest="task_count", type=int, default=None)
+    export.add_argument("--start-index", type=int, default=None)
+    export.add_argument("--shard-id", type=int, default=None)
+    export.add_argument("--num-shards", type=int, default=None)
+    export.add_argument("--validation-fraction", type=float, default=None)
+    export.add_argument("--min-validation-rows", type=int, default=None)
+    export.add_argument(
+        "--compress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    export.add_argument("--progress-every", type=int, default=None)
+    export.add_argument(
+        "--overwrite",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    export.add_argument("--validate-config-only", action="store_true")
+    _add_observability_arguments(export)
     return parser
 
 
@@ -412,6 +446,71 @@ def _run_task(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_rdbpfn_export(args: argparse.Namespace) -> int:
+    logger = configure_logging(
+        level=args.log_level,
+        log_file=args.log_file,
+    ).getChild("rdbpfn-export")
+    config = load_rdbpfn_export_config(
+        args.config,
+        overrides=RDBPFNExportConfigOverrides(
+            task_manifest=args.task_manifest,
+            output_root=args.output_dir,
+            task_count=args.task_count,
+            start_index=args.start_index,
+            shard_id=args.shard_id,
+            num_shards=args.num_shards,
+            validation_fraction=args.validation_fraction,
+            min_validation_rows=args.min_validation_rows,
+            compress=args.compress,
+            progress_every=args.progress_every,
+            overwrite=args.overwrite,
+        ),
+    )
+    if args.validate_config_only:
+        logger.info("RDBPFN export configuration validated: %s", args.config)
+        payload = config.to_dict()
+        payload["output_root"] = str(config.output_root)
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        close_logging()
+        return 0
+
+    reporter = ProgressReporter(
+        stage="rdbpfn-export",
+        logger=logger,
+        log_every=config.progress_every,
+        enabled=args.progress,
+        width=args.progress_width,
+    )
+    try:
+        result = export_rdbpfn_tasks(
+            config,
+            progress=lambda completed, total, dataset_name: reporter.update(
+                completed,
+                total,
+                dataset_name,
+            ),
+        )
+    except Exception:
+        logger.exception("RDBPFN export pipeline failed")
+        raise
+    finally:
+        reporter.close()
+        close_logging()
+    print(
+        json.dumps(
+            {
+                "dataset_count": result.dataset_count,
+                "output_root": str(result.output_root),
+                "manifest": str(result.manifest_path),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -428,6 +527,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "task":
         try:
             return _run_task(args)
+        except SchemaConfigError as error:
+            parser.error(str(error))
+    if args.command == "rdbpfn-export":
+        try:
+            return _run_rdbpfn_export(args)
         except SchemaConfigError as error:
             parser.error(str(error))
     parser.error(f"Unknown command: {args.command}")

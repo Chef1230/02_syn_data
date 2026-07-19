@@ -21,7 +21,11 @@ fi
 if [[ -n "${INSTANCE_OUTPUT_DIR:-}" && -z "${INSTANCE_MANIFEST:-}" ]]; then
   export INSTANCE_MANIFEST="${INSTANCE_OUTPUT_DIR}/manifest.json"
 fi
+if [[ -n "${TASK_OUTPUT_DIR:-}" && -z "${TASK_MANIFEST:-}" ]]; then
+  export TASK_MANIFEST="${TASK_OUTPUT_DIR}/manifest.json"
+fi
 
 "${BASH_BIN}" "${SCRIPT_DIR}/01_schema.sh" "${CONFIG_PATH}"
 "${BASH_BIN}" "${SCRIPT_DIR}/02_instance.sh" "${CONFIG_PATH}"
 "${BASH_BIN}" "${SCRIPT_DIR}/03_task.sh" "${CONFIG_PATH}"
+"${BASH_BIN}" "${SCRIPT_DIR}/04_rdbpfn_export.sh" "${CONFIG_PATH}"

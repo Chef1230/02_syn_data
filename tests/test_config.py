@@ -17,10 +17,12 @@ if str(SRC_ROOT) not in sys.path:
 
 from rdb_prior.cli import main
 from rdb_prior.config import (
+    RDBPFNExportConfigOverrides,
     SchemaConfigError,
     SchemaConfigOverrides,
     TaskConfigOverrides,
     load_schema_pipeline_config,
+    load_rdbpfn_export_config,
     load_task_pipeline_config,
 )
 
@@ -179,6 +181,38 @@ class SchemaConfigTests(unittest.TestCase):
         self.assertEqual(0, exit_code)
         resolved = json.loads(stdout.getvalue())
         self.assertEqual(5, resolved["planner"]["tasks_per_database"])
+
+    def test_rdbpfn_export_config_and_cli_overrides(self) -> None:
+        config_path = PROJECT_ROOT / "configs" / "refactor_v1.yaml"
+        config = load_rdbpfn_export_config(
+            config_path,
+            overrides=RDBPFNExportConfigOverrides(
+                task_count=7,
+                validation_fraction=0.25,
+                compress=False,
+            ),
+        )
+        self.assertEqual(7, config.task_count)
+        self.assertEqual(0.25, config.validation_fraction)
+        self.assertFalse(config.compress)
+
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            exit_code = main(
+                (
+                    "rdbpfn-export",
+                    "--config",
+                    str(config_path),
+                    "--count",
+                    "3",
+                    "--no-compress",
+                    "--validate-config-only",
+                )
+            )
+        self.assertEqual(0, exit_code)
+        resolved = json.loads(stdout.getvalue())
+        self.assertEqual(3, resolved["task_count"])
+        self.assertFalse(resolved["compress"])
 
 
 if __name__ == "__main__":

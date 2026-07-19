@@ -18,6 +18,7 @@ from rdb_prior.compilation.compiler import (
     RoleFeatureRule,
     TableCountFeatureRule,
 )
+from rdb_prior.export.pipeline import RDBPFNExportConfig
 from rdb_prior.instance.plan import FeatureSCMFamily
 from rdb_prior.instance.planner import InstancePlannerConfig
 from rdb_prior.pipeline import InstancePipelineConfig, SchemaPipelineConfig
@@ -87,6 +88,21 @@ class TaskConfigOverrides:
     overwrite: bool | None = None
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RDBPFNExportConfigOverrides:
+    task_manifest: Path | None = None
+    output_root: Path | None = None
+    task_count: int | None = None
+    start_index: int | None = None
+    shard_id: int | None = None
+    num_shards: int | None = None
+    validation_fraction: float | None = None
+    min_validation_rows: int | None = None
+    compress: bool | None = None
+    progress_every: int | None = None
+    overwrite: bool | None = None
+
+
 def load_schema_pipeline_config(
     path: str | Path,
     *,
@@ -111,6 +127,7 @@ def load_schema_pipeline_config(
             "instance_generation",
             "task",
             "task_generation",
+            "rdbpfn_export",
         },
         "config",
     )
@@ -133,6 +150,8 @@ def load_schema_pipeline_config(
             "instance_output_root",
             "instance_manifest",
             "task_output_root",
+            "task_manifest",
+            "rdbpfn_output_root",
         },
     )
     generation = _section(
@@ -193,6 +212,7 @@ def load_schema_pipeline_config(
     _section(root, "instance_generation", _INSTANCE_GENERATION_OPTIONS)
     _section(root, "task", _TASK_OPTIONS)
     _section(root, "task_generation", _TASK_GENERATION_OPTIONS)
+    _section(root, "rdbpfn_export", _RDBPFN_EXPORT_OPTIONS)
 
     cli = overrides or SchemaConfigOverrides()
     if not isinstance(cli, SchemaConfigOverrides):
@@ -493,6 +513,19 @@ _TASK_GENERATION_OPTIONS = {
     "project_version",
 }
 
+_RDBPFN_EXPORT_OPTIONS = {
+    "task_count",
+    "start_index",
+    "shard_id",
+    "num_shards",
+    "validation_fraction",
+    "min_validation_rows",
+    "compress",
+    "progress_every",
+    "overwrite",
+    "project_version",
+}
+
 
 def load_instance_pipeline_config(
     path: str | Path,
@@ -514,6 +547,8 @@ def load_instance_pipeline_config(
             "instance_output_root",
             "instance_manifest",
             "task_output_root",
+            "task_manifest",
+            "rdbpfn_output_root",
         },
     )
     instance = _section(root, "instance", _INSTANCE_OPTIONS)
@@ -623,6 +658,8 @@ def load_task_pipeline_config(
             "instance_output_root",
             "instance_manifest",
             "task_output_root",
+            "task_manifest",
+            "rdbpfn_output_root",
         },
     )
     task = _section(root, "task", _TASK_OPTIONS)
@@ -720,6 +757,97 @@ def load_task_pipeline_config(
     except (TypeError, ValueError) as error:
         raise SchemaConfigError(
             f"Invalid task pipeline config {config_path}: {error}"
+        ) from error
+
+
+def load_rdbpfn_export_config(
+    path: str | Path,
+    *,
+    overrides: RDBPFNExportConfigOverrides | None = None,
+) -> RDBPFNExportConfig:
+    """Load and validate stage-04 RDBPFN export configuration."""
+    config_path = Path(path).resolve()
+    load_task_pipeline_config(config_path)
+    root = _mapping(_load_document(config_path), "config")
+    paths = _section(
+        root,
+        "paths",
+        {
+            "schema_output_root",
+            "schema_manifest",
+            "instance_output_root",
+            "instance_manifest",
+            "task_output_root",
+            "task_manifest",
+            "rdbpfn_output_root",
+        },
+    )
+    export = _section(root, "rdbpfn_export", _RDBPFN_EXPORT_OPTIONS)
+    cli = overrides or RDBPFNExportConfigOverrides()
+    if not isinstance(cli, RDBPFNExportConfigOverrides):
+        raise TypeError(
+            "overrides must be RDBPFNExportConfigOverrides or None"
+        )
+
+    task_output = paths.get("task_output_root", "outputs/task_v1")
+    manifest_value = paths.get(
+        "task_manifest",
+        str(Path(task_output) / "manifest.json"),
+    )
+    output_value = paths.get("rdbpfn_output_root", "outputs/rdbpfn_v1")
+    if not isinstance(manifest_value, (str, Path)):
+        raise SchemaConfigError("config.paths.task_manifest must be a path string")
+    if not isinstance(output_value, (str, Path)):
+        raise SchemaConfigError(
+            "config.paths.rdbpfn_output_root must be a path string"
+        )
+
+    try:
+        return RDBPFNExportConfig(
+            task_manifest=_resolve_output_root(
+                config_path=config_path,
+                configured=Path(manifest_value),
+                override=cli.task_manifest,
+            ),
+            output_root=_resolve_output_root(
+                config_path=config_path,
+                configured=Path(output_value),
+                override=cli.output_root,
+            ),
+            task_count=_override(cli.task_count, export.get("task_count")),
+            start_index=_override(
+                cli.start_index,
+                export.get("start_index", 0),
+            ),
+            shard_id=_override(cli.shard_id, export.get("shard_id", 0)),
+            num_shards=_override(
+                cli.num_shards,
+                export.get("num_shards", 1),
+            ),
+            validation_fraction=_override(
+                cli.validation_fraction,
+                export.get("validation_fraction", 0.2),
+            ),
+            min_validation_rows=_override(
+                cli.min_validation_rows,
+                export.get("min_validation_rows", 8),
+            ),
+            compress=_override(cli.compress, export.get("compress", True)),
+            progress_every=_override(
+                cli.progress_every,
+                export.get("progress_every", 100),
+            ),
+            overwrite=_override(
+                cli.overwrite,
+                export.get("overwrite", False),
+            ),
+            project_version=export.get(
+                "project_version", "rdbpfn-export-v1"
+            ),
+        )
+    except (TypeError, ValueError) as error:
+        raise SchemaConfigError(
+            f"Invalid RDBPFN export config {config_path}: {error}"
         ) from error
 
 
@@ -923,7 +1051,9 @@ __all__ = [
     "SchemaConfigOverrides",
     "InstanceConfigOverrides",
     "TaskConfigOverrides",
+    "RDBPFNExportConfigOverrides",
     "load_schema_pipeline_config",
     "load_instance_pipeline_config",
     "load_task_pipeline_config",
+    "load_rdbpfn_export_config",
 ]

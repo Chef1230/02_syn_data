@@ -4,13 +4,14 @@ Stage 01 samples a validated anonymous `SchemaBlueprint`, preserves private
 motif provenance, and compiles a randomized `PhysicalSchema`. Stage 02 binds
 that schema to a reproducible `InstancePlan` and materializes validated table
 rows, keys, features, and event times. Stage 03 derives supervised tasks from
-the frozen database without changing its schema or rows.
+the frozen database without changing its schema or rows. Stage 04 exports each
+task as one RDBPFN `dbinfer_bench` dataset with its task-specific visible view.
 
 ## Run
 
 The schema command reads `configs/refactor_v1.yaml`. The reference config is
 derived from the schema-related priors in `syn_data/configs/default.yaml` and
-contains only options implemented by the current schema stage.
+contains only options implemented by the current four-stage pipeline.
 
 ```bash
 bash scripts/v1/01_schema.sh
@@ -121,7 +122,30 @@ bash scripts/v1/03_task.sh
 
 `03_task.sh` also supports `START_INDEX`, `SHARD_ID`, `NUM_SHARDS`,
 `PROGRESS_EVERY`, `CONFIG_PATH`, `PYTHON_BIN`, and
-`VALIDATE_CONFIG_ONLY`. Run all three configured stages with:
+`VALIDATE_CONFIG_ONLY`.
+
+Export task artifacts for RDBPFN:
+
+```bash
+bash scripts/v1/04_rdbpfn_export.sh
+```
+
+The common stage-04 overrides are:
+
+```bash
+TASK_MANIFEST=outputs/task_v1_20k/manifest.json \
+RDBPFN_OUTPUT_DIR=outputs/rdbpfn_v1_20k \
+NUM_EXPORTS=40000 \
+VALIDATION_FRACTION=0.2 \
+COMPRESS=1 \
+OVERWRITE=0 \
+bash scripts/v1/04_rdbpfn_export.sh
+```
+
+`04_rdbpfn_export.sh` also supports `START_INDEX`, `SHARD_ID`, `NUM_SHARDS`,
+`MIN_VALIDATION_ROWS`, `PROGRESS_EVERY`, `CONFIG_PATH`, `PYTHON_BIN`, and
+`VALIDATE_CONFIG_ONLY`. The direct entry point is `rdb-prior rdbpfn-export`.
+Run all four configured stages with:
 
 ```bash
 bash scripts/v1/generate_v1.sh
@@ -129,7 +153,7 @@ bash scripts/v1/generate_v1.sh
 
 ## Logging and progress
 
-All three commands write timestamped logs to stderr and keep the final JSON
+All four commands write timestamped logs to stderr and keep the final JSON
 summary on stdout. Interactive terminals show a progress bar automatically;
 redirected jobs emit one progress log every `progress_every` completed items.
 
@@ -183,6 +207,8 @@ value/weight lists.
   classification quality thresholds, and future cutoff/horizon ranges.
 - `task_generation`: instance selection, deterministic sharding, progress,
   overwrite behavior and project version.
+- `rdbpfn_export`: task selection, train/validation split, compressed NPZ,
+  deterministic sharding, progress, overwrite behavior and project version.
 
 Feature-column precedence is `role override -> table-count rule -> default`.
 The only valid role override keys are `entity`, `event`, `lookup`, `bridge`
@@ -270,6 +296,41 @@ pipeline requires exactly `tasks_per_database` valid tasks and fails instead
 of silently reducing the count. Load artifacts with
 `rdb_prior.task.artifacts.load_task_artifact`.
 
+The stage-04 output is directly loadable by RDBPFN:
+
+```text
+RDBPFN_OUTPUT_DIR/
+  manifest.json
+  task_sample_000000_000/
+    metadata.yaml
+    data/
+      t_000_abcd.npz
+      ...
+    task_sample_000000_000/
+      train.npz
+      validation.npz
+      test.npz
+```
+
+One directory is emitted per task because row visibility, cutoff time, and
+masked targets are task-specific. The exporter applies the canonical
+`TaskView`, translates logical row references to physical key values, removes
+masked target columns, and converts time values to `datetime64[ns]`. Support
+examples are deterministically split into DBB train/validation sets; query
+examples become the test set. NPZ compression is enabled by default to limit
+the extra on-disk copy.
+
+Run RDBPFN depth-1 DFS on every exported task dataset from the RDBPFN
+`data_preprocessing` directory:
+
+```bash
+cd ../RDBPFN/data_preprocessing
+bash benchmark_preprocess_depth1.sh \
+  ../../02_syn_data/outputs/rdbpfn_v1_sample 8
+```
+
+Use `benchmark_preprocess_depth2.sh` in the same way for depth 2.
+
 Business-process grammar, domain prototypes, role-aware compiler replacement,
-database-design randomization, additional Task DSL mechanisms, and legacy
-export remain later stages.
+database-design randomization and additional Task DSL mechanisms remain later
+stages.

@@ -9,6 +9,8 @@ paths:
   instance_output_root: outputs/instance_v1_sample
   instance_manifest: outputs/instance_v1_sample/manifest.json
   task_output_root: outputs/task_v1_sample
+  task_manifest: outputs/task_v1_sample/manifest.json
+  rdbpfn_output_root: outputs/rdbpfn_v1_sample
 
 generation:
   # 01_schema.sh can override these run-level values with environment vars.
@@ -171,6 +173,19 @@ task_generation:
   progress_every: 5
   overwrite: false
   project_version: task-pipeline-v1
+
+rdbpfn_export:
+  # One dbinfer_bench dataset is emitted per task to preserve its own view.
+  task_count: null
+  start_index: 0
+  shard_id: 0
+  num_shards: 1
+  validation_fraction: 0.20
+  min_validation_rows: 8
+  compress: true
+  progress_every: 5
+  overwrite: false
+  project_version: rdbpfn-export-v1
 
 # Connectivity, FK DAG, no self-loop, no parallel FK, role legality,
 # Entity/Event presence, Bridge parent count and rank order are hard schema
