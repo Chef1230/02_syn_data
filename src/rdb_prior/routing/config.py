@@ -96,6 +96,11 @@ class RouterTrainingConfig:
     lambda_diversity: float = 0.05
     overwrite: bool = False
     progress_every: int = 50
+    batch_size: int = 1
+    num_workers: int = 0
+    prefetch_factor: int = 2
+    artifact_cache_size: int = 16
+    mixed_precision: str = "none"
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_manifest, Path):
@@ -104,11 +109,20 @@ class RouterTrainingConfig:
             raise TypeError("output_root must be pathlib.Path")
         if not isinstance(self.model, RouterModelConfig):
             raise TypeError("model must be RouterModelConfig")
-        for name in ("epochs", "start_index", "seed", "progress_every"):
+        for name in (
+            "epochs",
+            "start_index",
+            "seed",
+            "progress_every",
+            "batch_size",
+            "num_workers",
+            "prefetch_factor",
+            "artifact_cache_size",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int):
                 raise TypeError(f"{name} must be an integer")
-            if value < 0 or (name == "epochs" and value < 1):
+            if value < 0 or name in {"epochs", "batch_size", "prefetch_factor"} and value < 1:
                 raise ValueError(f"{name} has an invalid value")
         if self.task_count is not None and (
             isinstance(self.task_count, bool)
@@ -133,8 +147,10 @@ class RouterTrainingConfig:
                 raise ValueError(f"{name} must be non-negative")
         if not 0 <= self.validation_fraction < 1:
             raise ValueError("validation_fraction must be in [0, 1)")
-        if self.device not in {"auto", "cpu", "cuda", "mps"}:
-            raise ValueError("device must be auto, cpu, cuda, or mps")
+        if not _valid_device(self.device):
+            raise ValueError("device must be auto, cpu, cuda, cuda:N, or mps")
+        if self.mixed_precision not in {"none", "fp16", "bf16"}:
+            raise ValueError("mixed_precision must be none, fp16, or bf16")
         if not isinstance(self.overwrite, bool):
             raise TypeError("overwrite must be a boolean")
 
@@ -169,10 +185,19 @@ class RoutedH5Config:
             self.start_index, int
         ) or self.start_index < 0:
             raise ValueError("start_index must be a non-negative integer")
-        if self.device not in {"auto", "cpu", "cuda", "mps"}:
-            raise ValueError("device must be auto, cpu, cuda, or mps")
+        if not _valid_device(self.device):
+            raise ValueError("device must be auto, cpu, cuda, cuda:N, or mps")
         if not isinstance(self.overwrite, bool):
             raise TypeError("overwrite must be a boolean")
+
+
+def _valid_device(value: str) -> bool:
+    if value in {"auto", "cpu", "cuda", "mps"}:
+        return True
+    if not isinstance(value, str) or not value.startswith("cuda:"):
+        return False
+    index = value.removeprefix("cuda:")
+    return index.isdigit()
 
     def to_dict(self) -> dict[str, object]:
         result = asdict(self)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -29,8 +30,12 @@ from rdb_prior.pipeline import (
 )
 from rdb_prior.routing.catalog import enumerate_schema_paths
 from rdb_prior.routing.config import RouterModelConfig, RouterTrainingConfig
-from rdb_prior.routing.data import RoutingTaskTensorizer, load_routing_tasks
-from rdb_prior.routing.losses import sparse_router_loss
+from rdb_prior.routing.data import (
+    RoutingTaskTensorizer,
+    collate_routed_tasks,
+    load_routing_tasks,
+)
+from rdb_prior.routing.losses import sparse_router_batch_loss, sparse_router_loss
 from rdb_prior.routing.checkpoint import load_router_checkpoint
 from rdb_prior.routing.network import SparseRelationalPFN
 from rdb_prior.routing.trainer import train_sparse_router
@@ -90,6 +95,10 @@ class SparseRouterTests(unittest.TestCase):
         self.assertEqual(16, training.model.min_rows_per_hop)
         self.assertEqual(32, training.model.rows_per_hop)
         self.assertEqual(600, training.model.max_rows_per_task)
+        self.assertEqual(8, training.batch_size)
+        self.assertEqual(8, training.num_workers)
+        self.assertEqual(2, training.prefetch_factor)
+        self.assertEqual("bf16", training.mixed_precision)
         routed = load_routed_h5_config(
             PROJECT_ROOT / "configs" / "refactor_v2.yaml"
         )
@@ -189,6 +198,13 @@ class SparseRouterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             raw = self._task(root)
+            manifest_path = root / "task" / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["entries"] = manifest["entries"] * 2
+            manifest["task_count"] = 2
+            manifest_path.write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
             model_config = RouterModelConfig(
                 max_candidates=6,
                 top_k_paths=2,
@@ -211,6 +227,9 @@ class SparseRouterTests(unittest.TestCase):
                     epochs=1,
                     validation_fraction=0.0,
                     device="cpu",
+                    batch_size=2,
+                    num_workers=2,
+                    prefetch_factor=2,
                 )
             )
             self.assertTrue(result.best_checkpoint.is_file())
@@ -220,6 +239,58 @@ class SparseRouterTests(unittest.TestCase):
             with torch.no_grad():
                 output = loaded.eval()(batch)
             self.assertEqual(len(batch.labels), len(output.regression_prediction))
+
+    def test_padded_two_task_batch_forward_and_backward(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            raw = self._task(Path(directory))
+            model_config = RouterModelConfig(
+                max_candidates=6,
+                top_k_paths=2,
+                max_source_columns=2,
+                min_rows_per_hop=2,
+                rows_per_hop=4,
+                max_target_columns=6,
+                token_dim=16,
+                type_embedding_dim=4,
+                router_hidden_dim=24,
+                transformer_heads=4,
+                transformer_layers=1,
+                dropout=0.0,
+            )
+            tensorizer = RoutingTaskTensorizer(model_config)
+            descriptors = tuple(
+                tensorizer.tensorize_descriptors(raw) for _ in range(2)
+            )
+            self.assertEqual(0, descriptors[0].source_values.shape[-1])
+            descriptor_batch = collate_routed_tasks(descriptors)
+            model = SparseRelationalPFN(model_config)
+            selection = model.select(descriptor_batch)
+            materialized = tuple(
+                tensorizer.materialize_selected(
+                    raw,
+                    selected_path_mask=selection.route_selection.hard_mask[index],
+                    selected_column_mask=selection.column_hard_mask[index],
+                )
+                for index in range(2)
+            )
+            batch = collate_routed_tasks(materialized)
+            output = model(batch, selection)
+            training = RouterTrainingConfig(
+                task_manifest=Path("unused.json"),
+                output_root=Path("unused"),
+                model=model_config,
+                epochs=1,
+                batch_size=2,
+            )
+            losses = sparse_router_batch_loss(output, batch, training)
+            losses.total.backward()
+
+            self.assertEqual(2, output.classification_logits.shape[0])
+            self.assertTrue(torch.isfinite(output.classification_logits).all())
+            self.assertTrue(torch.isfinite(losses.total))
+            self.assertIsNotNone(
+                next(model.path_router.scorer.parameters()).grad
+            )
 
 
 if __name__ == "__main__":

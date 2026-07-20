@@ -23,22 +23,26 @@ def straight_through_topk(
     valid_mask: torch.Tensor | None = None,
     temperature: float = 1.0,
 ) -> SparseSelection:
-    if logits.ndim != 1:
-        raise ValueError("straight_through_topk expects a vector")
+    if logits.ndim < 1:
+        raise ValueError("straight_through_topk expects at least one dimension")
     valid = (
         torch.ones_like(logits, dtype=torch.bool)
         if valid_mask is None
         else valid_mask.bool()
     )
+    if valid.shape != logits.shape:
+        raise ValueError("valid_mask must have the same shape as logits")
     probabilities = torch.sigmoid(logits / temperature) * valid.float()
     hard = torch.zeros_like(valid)
-    valid_count = int(valid.sum().item())
-    if valid_count:
+    selected_count = min(k, logits.shape[-1])
+    if selected_count:
         selected = torch.topk(
             logits.masked_fill(~valid, torch.finfo(logits.dtype).min),
-            k=min(k, valid_count),
+            k=selected_count,
+            dim=-1,
         ).indices
-        hard[selected] = True
+        hard.scatter_(-1, selected, True)
+        hard &= valid
     gates = hard.float() + probabilities - probabilities.detach()
     return SparseSelection(
         logits=logits,
@@ -77,15 +81,22 @@ class MLPPathRouter(nn.Module):
         self,
         path_features: torch.Tensor,
         task_context: torch.Tensor,
+        path_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, SparseSelection]:
         path_embeddings = self.path_encoder(path_features.float())
-        context = task_context.expand(len(path_embeddings), -1)
+        if path_embeddings.ndim == 2:
+            context = task_context.expand(len(path_embeddings), -1)
+        elif path_embeddings.ndim == 3:
+            context = task_context[:, None, :].expand_as(path_embeddings)
+        else:
+            raise ValueError("path_features must be [paths, dim] or [batch, paths, dim]")
         logits = self.scorer(
             torch.cat((path_embeddings, context), dim=-1)
         ).squeeze(-1)
         selection = straight_through_topk(
             logits,
             k=self.top_k,
+            valid_mask=path_mask,
             temperature=self.temperature,
         )
         return path_embeddings, selection
@@ -129,25 +140,35 @@ class MLPSourceColumnSelector(nn.Module):
         torch.Tensor,
     ]:
         column_embeddings = self.column_encoder(column_features.float())
-        path_context = path_embeddings[:, None, :].expand_as(column_embeddings)
-        task = task_context.reshape(1, 1, -1).expand_as(column_embeddings)
+        if column_embeddings.ndim == 3:
+            path_context = path_embeddings[:, None, :].expand_as(column_embeddings)
+            task = task_context.reshape(1, 1, -1).expand_as(column_embeddings)
+        elif column_embeddings.ndim == 4:
+            path_context = path_embeddings[:, :, None, :].expand_as(
+                column_embeddings
+            )
+            task = task_context[:, None, None, :].expand_as(column_embeddings)
+        else:
+            raise ValueError(
+                "column_features must be [paths, columns, dim] or "
+                "[batch, paths, columns, dim]"
+            )
         logits = self.scorer(
             torch.cat((column_embeddings, path_context, task), dim=-1)
         ).squeeze(-1)
-        gates = torch.zeros_like(logits)
-        probabilities = torch.zeros_like(logits)
-        hard_mask = torch.zeros_like(column_mask, dtype=torch.bool)
-        for path_index in range(logits.shape[0]):
-            selection = straight_through_topk(
-                logits[path_index],
-                k=self.top_c,
-                valid_mask=column_mask[path_index],
-                temperature=self.temperature,
-            )
-            gates[path_index] = selection.gates
-            probabilities[path_index] = selection.soft_probabilities
-            hard_mask[path_index] = selection.hard_mask
-        return column_embeddings, logits, probabilities, gates, hard_mask
+        selection = straight_through_topk(
+            logits,
+            k=self.top_c,
+            valid_mask=column_mask,
+            temperature=self.temperature,
+        )
+        return (
+            column_embeddings,
+            logits,
+            selection.soft_probabilities,
+            selection.gates,
+            selection.hard_mask,
+        )
 
 
 __all__ = [

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, fields
 import hashlib
 import json
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 import numpy as np
@@ -91,13 +93,149 @@ class RoutedTaskTensors:
         return ~self.support_mask
 
 
-def load_routing_tasks(
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RoutedTaskBatch:
+    """Padded heterogeneous routing tasks for one GPU optimizer step."""
+
+    task_ids: tuple[str, ...]
+    prediction_types: tuple[PredictionType, ...]
+    num_classes: tuple[int, ...]
+    target_values: torch.Tensor
+    target_missing: torch.Tensor
+    target_type_ids: torch.Tensor
+    target_column_features: torch.Tensor
+    target_column_mask: torch.Tensor
+    row_mask: torch.Tensor
+    support_mask: torch.Tensor
+    labels: torch.Tensor
+    path_features: torch.Tensor
+    path_mask: torch.Tensor
+    path_costs: torch.Tensor
+    path_similarity: torch.Tensor
+    route_targets: torch.Tensor
+    route_weights: torch.Tensor
+    source_values: torch.Tensor
+    source_missing: torch.Tensor
+    source_row_mask: torch.Tensor
+    source_positions: torch.Tensor
+    source_type_ids: torch.Tensor
+    source_column_features: torch.Tensor
+    source_column_mask: torch.Tensor
+
+    def to(
+        self,
+        device: torch.device | str,
+        *,
+        non_blocking: bool = False,
+    ) -> RoutedTaskBatch:
+        values: dict[str, Any] = {}
+        for field in fields(self):
+            value = getattr(self, field.name)
+            values[field.name] = (
+                value.to(device, non_blocking=non_blocking)
+                if torch.is_tensor(value)
+                else value
+            )
+        return RoutedTaskBatch(**values)
+
+    def pin_memory(self) -> RoutedTaskBatch:
+        values: dict[str, Any] = {}
+        for field in fields(self):
+            value = getattr(self, field.name)
+            values[field.name] = value.pin_memory() if torch.is_tensor(value) else value
+        return RoutedTaskBatch(**values)
+
+    @property
+    def query_mask(self) -> torch.Tensor:
+        return self.row_mask & ~self.support_mask
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RoutingTaskReference:
+    artifact_path: Path
+    schema_id: str
+    task_id: str
+
+
+class RoutingTaskStore:
+    """Lazy manifest reader with a shared LRU for schema/database artifacts."""
+
+    def __init__(
+        self,
+        task_manifest: Path,
+        *,
+        start_index: int = 0,
+        task_count: int | None = None,
+        cache_size: int = 16,
+    ) -> None:
+        self.task_manifest = Path(task_manifest)
+        self.cache_size = max(0, int(cache_size))
+        self.references = load_routing_task_references(
+            self.task_manifest,
+            start_index=start_index,
+            task_count=task_count,
+        )
+        self._instance_cache: OrderedDict[Path, Any] = OrderedDict()
+        self._schema_cache: OrderedDict[Path, Any] = OrderedDict()
+        self._cache_lock = Lock()
+
+    def __len__(self) -> int:
+        return len(self.references)
+
+    def load(self, reference: RoutingTaskReference) -> RawRoutingTask:
+        task_path = reference.artifact_path
+        task_artifact = load_task_artifact(task_path)
+        instance_path = _resolve_reference(
+            task_path, task_artifact.instance_artifact
+        )
+        schema_path = _resolve_reference(task_path, task_artifact.schema_artifact)
+        instance = self._cached_load(
+            instance_path,
+            load_instance_artifact,
+            self._instance_cache,
+        )
+        schema_artifact = self._cached_load(
+            schema_path,
+            load_schema_artifact,
+            self._schema_cache,
+        )
+        schema = schema_artifact.compilation.schema
+        view = build_task_view(schema, instance.database, task_artifact.task.plan)
+        return RawRoutingTask(
+            artifact_path=task_path,
+            task_artifact=task_artifact,
+            schema=schema,
+            database=instance.database,
+            view=view,
+        )
+
+    def _cached_load(self, path: Path, loader, cache: OrderedDict[Path, Any]):
+        if not self.cache_size:
+            return loader(path)
+        with self._cache_lock:
+            cached = cache.get(path)
+            if cached is not None:
+                cache.move_to_end(path)
+                return cached
+        loaded = loader(path)
+        with self._cache_lock:
+            cached = cache.get(path)
+            if cached is not None:
+                cache.move_to_end(path)
+                return cached
+            cache[path] = loaded
+            while len(cache) > self.cache_size:
+                cache.popitem(last=False)
+        return loaded
+
+
+def load_routing_task_references(
     task_manifest: Path,
     *,
     start_index: int = 0,
     task_count: int | None = None,
-) -> tuple[RawRoutingTask, ...]:
-    payload = json.loads(task_manifest.read_text(encoding="utf-8"))
+) -> tuple[RoutingTaskReference, ...]:
+    payload = json.loads(Path(task_manifest).read_text(encoding="utf-8"))
     if payload.get("artifact_type") != "relational_task_manifest":
         raise ValueError("input is not a relational task manifest")
     if payload.get("artifact_version") != 1:
@@ -108,30 +246,136 @@ def load_routing_tasks(
     selected = entries[start_index:]
     if task_count is not None:
         selected = selected[:task_count]
-    result: list[RawRoutingTask] = []
+    references: list[RoutingTaskReference] = []
     for entry in selected:
         if not isinstance(entry, dict) or not isinstance(entry.get("artifact"), str):
             raise ValueError("task manifest entry is malformed")
-        task_path = (task_manifest.parent / entry["artifact"]).resolve()
-        task_artifact = load_task_artifact(task_path)
-        instance_path = _resolve_reference(
-            task_path, task_artifact.instance_artifact
-        )
-        schema_path = _resolve_reference(task_path, task_artifact.schema_artifact)
-        instance = load_instance_artifact(instance_path)
-        schema_artifact = load_schema_artifact(schema_path)
-        schema = schema_artifact.compilation.schema
-        view = build_task_view(schema, instance.database, task_artifact.task.plan)
-        result.append(
-            RawRoutingTask(
-                artifact_path=task_path,
-                task_artifact=task_artifact,
-                schema=schema,
-                database=instance.database,
-                view=view,
+        schema_id = entry.get("schema_id")
+        task_id = entry.get("task_id")
+        if not isinstance(schema_id, str) or not schema_id:
+            raise ValueError("task manifest entry is missing schema_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError("task manifest entry is missing task_id")
+        references.append(
+            RoutingTaskReference(
+                artifact_path=(Path(task_manifest).parent / entry["artifact"]).resolve(),
+                schema_id=schema_id,
+                task_id=task_id,
             )
         )
-    return tuple(result)
+    return tuple(references)
+
+
+def load_routing_tasks(
+    task_manifest: Path,
+    *,
+    start_index: int = 0,
+    task_count: int | None = None,
+) -> tuple[RawRoutingTask, ...]:
+    store = RoutingTaskStore(
+        task_manifest,
+        start_index=start_index,
+        task_count=task_count,
+    )
+    return tuple(store.load(reference) for reference in store.references)
+
+
+def collate_routed_tasks(tasks: tuple[RoutedTaskTensors, ...] | list[RoutedTaskTensors]) -> RoutedTaskBatch:
+    """Pad task-local row/column/path axes without merging their semantics."""
+    if not tasks:
+        raise ValueError("cannot collate an empty routed task batch")
+    batch_size = len(tasks)
+    max_rows = max(task.target_values.shape[0] for task in tasks)
+    max_targets = max(task.target_values.shape[1] for task in tasks)
+    max_paths = max(task.path_features.shape[0] for task in tasks)
+    max_columns = max(task.source_values.shape[2] for task in tasks)
+    max_samples = max(task.source_values.shape[3] for task in tasks)
+    path_feature_dim = tasks[0].path_features.shape[-1]
+    column_feature_dim = tasks[0].source_column_features.shape[-1]
+
+    target_values = torch.zeros(batch_size, max_rows, max_targets)
+    target_missing = torch.ones(batch_size, max_rows, max_targets, dtype=torch.bool)
+    target_type_ids = torch.zeros(batch_size, max_targets, dtype=torch.long)
+    target_column_features = torch.zeros(batch_size, max_targets, column_feature_dim)
+    target_column_mask = torch.zeros(batch_size, max_targets, dtype=torch.bool)
+    row_mask = torch.zeros(batch_size, max_rows, dtype=torch.bool)
+    support_mask = torch.zeros(batch_size, max_rows, dtype=torch.bool)
+    labels = torch.zeros(batch_size, max_rows, dtype=torch.float32)
+    path_features = torch.zeros(batch_size, max_paths, path_feature_dim)
+    path_mask = torch.zeros(batch_size, max_paths, dtype=torch.bool)
+    path_costs = torch.zeros(batch_size, max_paths, 3)
+    path_similarity = torch.zeros(batch_size, max_paths, max_paths)
+    route_targets = torch.zeros(batch_size, max_paths)
+    route_weights = torch.zeros(batch_size, max_paths)
+    source_values = torch.zeros(
+        batch_size, max_rows, max_paths, max_columns, max_samples
+    )
+    source_missing = torch.ones_like(source_values, dtype=torch.bool)
+    source_row_mask = torch.zeros_like(source_values, dtype=torch.bool)
+    source_positions = torch.zeros(batch_size, max_rows, max_paths, max_samples)
+    source_type_ids = torch.zeros(
+        batch_size, max_paths, max_columns, dtype=torch.long
+    )
+    source_column_features = torch.zeros(
+        batch_size, max_paths, max_columns, column_feature_dim
+    )
+    source_column_mask = torch.zeros(
+        batch_size, max_paths, max_columns, dtype=torch.bool
+    )
+
+    for index, task in enumerate(tasks):
+        rows, targets = task.target_values.shape
+        paths = task.path_features.shape[0]
+        columns = task.source_values.shape[2]
+        samples = task.source_values.shape[3]
+        target_values[index, :rows, :targets] = task.target_values
+        target_missing[index, :rows, :targets] = task.target_missing
+        target_type_ids[index, :targets] = task.target_type_ids
+        target_column_features[index, :targets] = task.target_column_features
+        target_column_mask[index, :targets] = True
+        row_mask[index, :rows] = True
+        support_mask[index, :rows] = task.support_mask
+        labels[index, :rows] = task.labels.float()
+        path_features[index, :paths] = task.path_features
+        path_mask[index, :paths] = True
+        path_costs[index, :paths] = task.path_costs
+        path_similarity[index, :paths, :paths] = task.path_similarity
+        route_targets[index, :paths] = task.route_targets
+        route_weights[index, :paths] = task.route_weights
+        source_values[index, :rows, :paths, :columns, :samples] = task.source_values
+        source_missing[index, :rows, :paths, :columns, :samples] = task.source_missing
+        source_row_mask[index, :rows, :paths, :columns, :samples] = task.source_row_mask
+        source_positions[index, :rows, :paths, :samples] = task.source_positions
+        source_type_ids[index, :paths, :columns] = task.source_type_ids
+        source_column_features[index, :paths, :columns] = task.source_column_features
+        source_column_mask[index, :paths, :columns] = task.source_column_mask
+
+    return RoutedTaskBatch(
+        task_ids=tuple(task.task_id for task in tasks),
+        prediction_types=tuple(task.prediction_type for task in tasks),
+        num_classes=tuple(task.num_classes for task in tasks),
+        target_values=target_values,
+        target_missing=target_missing,
+        target_type_ids=target_type_ids,
+        target_column_features=target_column_features,
+        target_column_mask=target_column_mask,
+        row_mask=row_mask,
+        support_mask=support_mask,
+        labels=labels,
+        path_features=path_features,
+        path_mask=path_mask,
+        path_costs=path_costs,
+        path_similarity=path_similarity,
+        route_targets=route_targets,
+        route_weights=route_weights,
+        source_values=source_values,
+        source_missing=source_missing,
+        source_row_mask=source_row_mask,
+        source_positions=source_positions,
+        source_type_ids=source_type_ids,
+        source_column_features=source_column_features,
+        source_column_mask=source_column_mask,
+    )
 
 
 class RoutingTaskTensorizer:
@@ -212,13 +456,14 @@ class RoutingTaskTensorizer:
         rows = len(row_ids)
         path_count = len(paths)
         samples = self.config.rows_per_hop
+        stored_samples = samples if materialize_relations else 0
         source_values = np.zeros(
-            (rows, path_count, max_source_columns, samples), dtype=np.float32
+            (rows, path_count, max_source_columns, stored_samples), dtype=np.float32
         )
         source_missing = np.ones_like(source_values, dtype=bool)
         source_row_mask = np.zeros_like(source_values, dtype=bool)
         source_positions = np.zeros(
-            (rows, path_count, samples), dtype=np.float32
+            (rows, path_count, stored_samples), dtype=np.float32
         )
         source_type_ids = np.zeros(
             (path_count, max_source_columns), dtype=np.int64
@@ -709,8 +954,13 @@ def _resolve_reference(artifact_path: Path, reference: str) -> Path:
 
 __all__ = [
     "RawRoutingTask",
+    "RoutedTaskBatch",
     "RoutedTaskTensors",
+    "RoutingTaskReference",
+    "RoutingTaskStore",
     "RoutingTaskTensorizer",
+    "collate_routed_tasks",
     "column_feature_vector",
+    "load_routing_task_references",
     "load_routing_tasks",
 ]

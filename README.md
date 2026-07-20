@@ -405,12 +405,29 @@ strategies never enter model features. Query labels enter only
 `L_query-pred`; schema/database IDs, rather than individual tasks, determine
 the validation split.
 
+Router training lazily loads task artifacts, caches recently used
+schema/instance objects, prefetches CPU tensorization, pads heterogeneous tasks
+into a GPU batch, and aggregates only the hard-selected `Top-K x C` relation
+slots. The reference v2 configuration uses `batch_size: 8`, `num_workers: 8`,
+`prefetch_factor: 2`, and BF16. Override them from the shell when tuning for a
+specific GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES=5 DEVICE=cuda \
+ROUTER_BATCH_SIZE=16 NUM_WORKERS=8 PREFETCH_FACTOR=2 MIXED_PRECISION=bf16 \
+bash scripts/v1/04b_router_train.sh configs/refactor_v2.yaml --progress
+```
+
+Use `MIXED_PRECISION=fp16` on CUDA devices without BF16 support. Batch size is
+the main GPU-memory control; increase it gradually while watching peak memory.
+
 Install the optional model dependency and run:
 
 ```bash
 pip install -e '.[router]'
 bash scripts/v1/04b_router_train.sh configs/refactor_v2.yaml
 bash scripts/v1/05_routed_h5.sh configs/refactor_v2.yaml
+bash scripts/v1/06_tfm_train.sh configs/refactor_v2.yaml
 ```
 
 For a fresh output directory, the complete schema-to-routed-H5 sequence is:
@@ -421,6 +438,12 @@ bash scripts/v1/generate_v2.sh configs/refactor_v2.yaml
 
 This route-native sequence does not invoke `04_rdbpfn_export.sh`; that script
 is retained for the legacy RDBPFN/DFS export path.
+
+`06_tfm_train.sh` launches `RDBPFN_routed` with one task per device. Its main
+overrides are `RDBPFN_ROOT`, `ROUTED_H5_OUTPUT`, `NUM_PROCESSES`,
+`MIXED_PRECISION`, `TFM_NUM_STEPS`, `TFM_NUM_EPOCHS`, `TFM_LR`,
+`TFM_LOAD_CHECKPOINT`, and `TFM_SAVE_CHECKPOINT`. Additional arguments are
+forwarded as Hydra overrides.
 
 Checkpoints are written below `OUTPUT_DIR/router/checkpoints/`. The H5 file at
 `OUTPUT_DIR/routed/routed_tasks.h5` stores per-task target tokens, selected

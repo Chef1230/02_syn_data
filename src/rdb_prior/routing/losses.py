@@ -10,7 +10,7 @@ from torch.nn import functional as F
 from rdb_prior.task.model import PredictionType
 
 from .config import RouterTrainingConfig
-from .data import RoutedTaskTensors
+from .data import RoutedTaskBatch, RoutedTaskTensors
 from .network import SparseRouterOutput
 
 
@@ -115,4 +115,101 @@ def sparse_router_loss(
     )
 
 
-__all__ = ["RouterLosses", "sparse_router_loss"]
+def sparse_router_batch_loss(
+    output: SparseRouterOutput,
+    batch: RoutedTaskBatch,
+    config: RouterTrainingConfig,
+) -> RouterLosses:
+    """Average the original five-part objective across padded tasks."""
+    prediction_terms: list[torch.Tensor] = []
+    for index, prediction_type in enumerate(batch.prediction_types):
+        query = batch.query_mask[index]
+        if prediction_type is PredictionType.CLASSIFICATION:
+            classes = batch.num_classes[index]
+            if classes > output.classification_logits.shape[-1]:
+                raise ValueError("task has more classes than model.max_classes")
+            prediction_terms.append(
+                F.cross_entropy(
+                    output.classification_logits[index, query, :classes],
+                    batch.labels[index, query].long(),
+                )
+            )
+        else:
+            prediction_terms.append(
+                F.mse_loss(
+                    output.regression_prediction[index, query],
+                    batch.labels[index, query].float(),
+                )
+            )
+    query_prediction = torch.stack(prediction_terms).mean()
+
+    valid_paths = batch.path_mask.float()
+    route_terms = F.binary_cross_entropy_with_logits(
+        output.route_selection.logits,
+        batch.route_targets.float(),
+        reduction="none",
+    )
+    route_weights = batch.route_weights * valid_paths
+    route = (
+        (route_terms * route_weights).sum(dim=-1)
+        / route_weights.sum(dim=-1).clamp_min(1e-6)
+    ).mean()
+
+    route_probability = output.route_selection.soft_probabilities * valid_paths
+    column_probability = output.column_probabilities
+    valid_columns = batch.source_column_mask.float()
+    mean_column_fraction = (
+        (column_probability * valid_columns).sum(dim=-1)
+        / valid_columns.sum(dim=-1).clamp_min(1.0)
+    )
+    effective_read = route_probability * mean_column_fraction
+    scalar_path_cost = batch.path_costs.mean(dim=-1)
+    cost = (
+        (effective_read * scalar_path_cost).sum(dim=-1)
+        / effective_read.sum(dim=-1).clamp_min(1e-6)
+    ).mean()
+
+    route_excess = F.relu(
+        route_probability.sum(dim=-1) - config.model.top_k_paths
+    ) / max(1, config.model.max_candidates)
+    column_counts = (column_probability * valid_columns).sum(dim=-1)
+    column_excess = F.relu(
+        column_counts - config.model.max_source_columns
+    ) / valid_columns.sum(dim=-1).clamp_min(1.0)
+    sparse = (
+        route_excess.square()
+        + (column_excess * route_probability).sum(dim=-1)
+        / route_probability.sum(dim=-1).clamp_min(1e-6)
+    ).mean()
+
+    gates = output.route_selection.gates * valid_paths
+    pair_weights = gates[:, :, None] * gates[:, None, :]
+    off_diagonal = ~torch.eye(
+        gates.shape[-1], dtype=torch.bool, device=gates.device
+    )
+    off_diagonal = off_diagonal[None, :, :].float()
+    diversity = (
+        (pair_weights * batch.path_similarity * off_diagonal).sum(dim=(1, 2))
+        / (pair_weights * off_diagonal)
+        .sum(dim=(1, 2))
+        .clamp_min(1e-6)
+    ).mean()
+
+    total = (
+        query_prediction
+        + config.lambda_route * route
+        + config.lambda_cost * cost
+        + config.lambda_sparse * sparse
+        + config.lambda_diversity * diversity
+    )
+    return RouterLosses(
+        total=total,
+        query_prediction=query_prediction,
+        route=route,
+        cost=cost,
+        sparse=sparse,
+        diversity=diversity,
+    )
+
+
+__all__ = ["RouterLosses", "sparse_router_batch_loss", "sparse_router_loss"]

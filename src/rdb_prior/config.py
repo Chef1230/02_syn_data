@@ -139,6 +139,10 @@ class RouterTrainingConfigOverrides:
     start_index: int | None = None
     epochs: int | None = None
     device: str | None = None
+    batch_size: int | None = None
+    num_workers: int | None = None
+    prefetch_factor: int | None = None
+    mixed_precision: str | None = None
     overwrite: bool | None = None
 
 
@@ -610,6 +614,11 @@ _PATH_ROUTER_OPTIONS = {
     "lambda_diversity",
     "overwrite",
     "progress_every",
+    "batch_size",
+    "num_workers",
+    "prefetch_factor",
+    "artifact_cache_size",
+    "mixed_precision",
 }
 
 _ROUTED_H5_OPTIONS = {
@@ -1009,6 +1018,15 @@ def load_router_training_config(
                 cli.overwrite, router.get("overwrite", False)
             ),
             progress_every=router.get("progress_every", 50),
+            batch_size=_override(cli.batch_size, router.get("batch_size", 1)),
+            num_workers=_override(cli.num_workers, router.get("num_workers", 0)),
+            prefetch_factor=_override(
+                cli.prefetch_factor, router.get("prefetch_factor", 2)
+            ),
+            artifact_cache_size=router.get("artifact_cache_size", 16),
+            mixed_precision=_override(
+                cli.mixed_precision, router.get("mixed_precision", "none")
+            ),
         )
     except (TypeError, ValueError) as error:
         raise SchemaConfigError(

@@ -58,36 +58,90 @@ class PFNStyleTransformer(nn.Module):
         relation_mask: torch.Tensor,
         labels: torch.Tensor,
         support_mask: torch.Tensor,
+        row_mask: torch.Tensor | None = None,
+        target_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        rows = target_tokens.shape[0]
+        squeeze = target_tokens.ndim == 3
+        if squeeze:
+            target_tokens = target_tokens.unsqueeze(0)
+            relation_tokens = relation_tokens.unsqueeze(0)
+            relation_mask = relation_mask.unsqueeze(0)
+            labels = labels.unsqueeze(0)
+            support_mask = support_mask.unsqueeze(0)
+            row_mask = (
+                torch.ones_like(support_mask)
+                if row_mask is None
+                else row_mask.unsqueeze(0)
+            )
+            target_mask = (
+                torch.ones(
+                    1,
+                    target_tokens.shape[2],
+                    dtype=torch.bool,
+                    device=target_tokens.device,
+                )
+                if target_mask is None
+                else target_mask.unsqueeze(0)
+            )
+        elif target_tokens.ndim == 4:
+            if row_mask is None:
+                row_mask = torch.ones_like(support_mask)
+            if target_mask is None:
+                target_mask = torch.ones(
+                    target_tokens.shape[0],
+                    target_tokens.shape[2],
+                    dtype=torch.bool,
+                    device=target_tokens.device,
+                )
+        else:
+            raise ValueError(
+                "target_tokens must be [rows, columns, dim] or "
+                "[batch, rows, columns, dim]"
+            )
+        batch, rows, target_count, dimension = target_tokens.shape
         target = target_tokens + self.target_token_type
         relation = relation_tokens + self.relation_token_type
-        cls = self.cls_token.expand(rows, -1, -1)
-        features = torch.cat((cls, target, relation), dim=1)
-        prefix_mask = torch.zeros(
-            (rows, 1 + target.shape[1]),
+        cls = self.cls_token.reshape(1, 1, 1, dimension).expand(
+            batch, rows, 1, dimension
+        )
+        features = torch.cat((cls, target, relation), dim=2)
+        cls_mask = torch.zeros(
+            (batch, rows, 1),
             dtype=torch.bool,
             device=target.device,
         )
-        key_padding = torch.cat((prefix_mask, ~relation_mask), dim=1)
+        target_padding = (~target_mask.bool())[:, None, :].expand(
+            batch, rows, target_count
+        )
+        key_padding = torch.cat(
+            (cls_mask, target_padding, ~relation_mask.bool()), dim=2
+        )
+        feature_count = features.shape[2]
         encoded_features = self.feature_encoder(
-            features, src_key_padding_mask=key_padding
+            features.reshape(batch * rows, feature_count, dimension),
+            src_key_padding_mask=key_padding.reshape(batch * rows, feature_count),
         )
-        row_tokens = encoded_features[:, 0]
-        label_tokens = torch.zeros_like(row_tokens)
-        label_tokens[support_mask] = self.label_encoder(
-            labels[support_mask].float().reshape(-1, 1)
+        row_tokens = encoded_features[:, 0].reshape(batch, rows, dimension)
+        encoded_labels = self.label_encoder(labels.float().unsqueeze(-1))
+        visible_labels = support_mask.bool() & row_mask.bool()
+        label_tokens = encoded_labels * visible_labels.unsqueeze(-1)
+        row_tokens = (
+            row_tokens
+            + label_tokens
+            + self.split_embedding(support_mask.long())
         )
-        row_tokens = row_tokens + label_tokens
-        row_tokens = row_tokens + self.split_embedding(support_mask.long())
         # Query labels never enter this stream. Rows may interact through X and
         # support labels, matching PFN-style in-context prediction.
-        contextual_rows = self.row_encoder(row_tokens.unsqueeze(0)).squeeze(0)
-        return (
-            self.classification_head(contextual_rows),
-            self.regression_head(contextual_rows).squeeze(-1),
-            contextual_rows,
+        contextual_rows = self.row_encoder(
+            row_tokens,
+            src_key_padding_mask=~row_mask.bool(),
         )
+        contextual_rows = contextual_rows * row_mask.unsqueeze(-1)
+        classification = self.classification_head(contextual_rows)
+        regression = self.regression_head(contextual_rows).squeeze(-1)
+        if squeeze:
+            return classification[0], regression[0], contextual_rows[0]
+        return classification, regression, contextual_rows
 
 
 __all__ = ["PFNStyleTransformer"]

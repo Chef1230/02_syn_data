@@ -248,8 +248,14 @@ def _build_parser() -> argparse.ArgumentParser:
     router.add_argument("--count", dest="task_count", type=int, default=None)
     router.add_argument("--start-index", type=int, default=None)
     router.add_argument("--epochs", type=int, default=None)
+    router.add_argument("--device", default=None)
+    router.add_argument("--batch-size", type=int, default=None)
+    router.add_argument("--num-workers", type=int, default=None)
+    router.add_argument("--prefetch-factor", type=int, default=None)
     router.add_argument(
-        "--device", choices=("auto", "cpu", "cuda", "mps"), default=None
+        "--mixed-precision",
+        choices=("none", "fp16", "bf16"),
+        default=None,
     )
     router.add_argument(
         "--overwrite", action=argparse.BooleanOptionalAction, default=None
@@ -269,9 +275,7 @@ def _build_parser() -> argparse.ArgumentParser:
     routed_h5.add_argument("--output", dest="output_path", type=Path, default=None)
     routed_h5.add_argument("--count", dest="task_count", type=int, default=None)
     routed_h5.add_argument("--start-index", type=int, default=None)
-    routed_h5.add_argument(
-        "--device", choices=("auto", "cpu", "cuda", "mps"), default=None
-    )
+    routed_h5.add_argument("--device", default=None)
     routed_h5.add_argument(
         "--overwrite", action=argparse.BooleanOptionalAction, default=None
     )
@@ -626,6 +630,10 @@ def _run_router_train(args: argparse.Namespace) -> int:
             start_index=args.start_index,
             epochs=args.epochs,
             device=args.device,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            prefetch_factor=args.prefetch_factor,
+            mixed_precision=args.mixed_precision,
             overwrite=args.overwrite,
         ),
     )
