@@ -11,7 +11,12 @@ from rdb_prior.compilation.model import ColumnKind, PhysicalSchema
 from rdb_prior.generation.model import DatabaseInstance
 from rdb_prior.schema.spec import TableRole
 from rdb_prior.task.mechanisms import future_event_labels
-from rdb_prior.task.model import PlannedTask, PredictionType, TaskMechanism
+from rdb_prior.task.model import (
+    PlannedTask,
+    PredictionType,
+    RoutePathLabel,
+    TaskMechanism,
+)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -86,6 +91,8 @@ def validate_task(
             issues.append(_issue("support_classes", "support has fewer than two classes"))
         if len(np.unique(data.query_labels)) < 2:
             issues.append(_issue("query_classes", "query has fewer than two classes"))
+
+    issues.extend(_validate_route_supervision(schema, plan.target_table_id, plan.route_supervision))
 
     if plan.mechanism is TaskMechanism.RELATION_ATTRIBUTE:
         issues.extend(_validate_relation_attribute(schema, database, task))
@@ -176,6 +183,51 @@ def _validate_future_event(
                 "every Event table must use the common task cutoff",
             )
         )
+    return issues
+
+
+def _validate_route_supervision(
+    schema: PhysicalSchema,
+    target_table_id: str,
+    labels: tuple[RoutePathLabel, ...],
+) -> list[TaskValidationIssue]:
+    issues: list[TaskValidationIssue] = []
+    foreign_keys = {
+        foreign_key.foreign_key_id: foreign_key
+        for foreign_key in schema.foreign_keys
+    }
+    for label in labels:
+        current = target_table_id
+        visited = {current}
+        for foreign_key_id in label.foreign_key_ids:
+            foreign_key = foreign_keys.get(foreign_key_id)
+            if foreign_key is None:
+                issues.append(
+                    _issue(
+                        "route_foreign_key",
+                        f"route supervision references unknown FK {foreign_key_id}",
+                    )
+                )
+                break
+            if current == foreign_key.parent_table_id:
+                following = foreign_key.child_table_id
+            elif current == foreign_key.child_table_id:
+                following = foreign_key.parent_table_id
+            else:
+                issues.append(
+                    _issue(
+                        "route_continuity",
+                        "route supervision is not contiguous from target table",
+                    )
+                )
+                break
+            if following in visited:
+                issues.append(
+                    _issue("route_cycle", "route supervision contains a cycle")
+                )
+                break
+            visited.add(following)
+            current = following
     return issues
 
 

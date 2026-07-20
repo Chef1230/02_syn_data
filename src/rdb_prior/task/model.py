@@ -20,6 +20,43 @@ class PredictionType(str, Enum):
     REGRESSION = "regression"
 
 
+class RouteRole(str, Enum):
+    """Synthetic Task DSL supervision for one exact FK path."""
+
+    REQUIRED = "required"
+    OPTIONAL = "optional"
+    DISTRACTOR = "distractor"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RoutePathLabel:
+    foreign_key_ids: tuple[str, ...]
+    role: RouteRole
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.foreign_key_ids, tuple) or not (
+            self.foreign_key_ids
+        ):
+            raise ValueError("foreign_key_ids must be a non-empty tuple")
+        for foreign_key_id in self.foreign_key_ids:
+            _identifier("route foreign key", foreign_key_id)
+        if not isinstance(self.role, RouteRole):
+            raise TypeError("role must be RouteRole")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "foreign_key_ids": list(self.foreign_key_ids),
+            "role": self.role.value,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> RoutePathLabel:
+        return cls(
+            foreign_key_ids=tuple(data["foreign_key_ids"]),
+            role=RouteRole(data["role"]),
+        )
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ObservationRule:
     table_id: str
@@ -69,6 +106,7 @@ class TaskPlan:
     horizon_end_time: int | None = None
     masked_column_ids: tuple[str, ...] = ()
     observation_rules: tuple[ObservationRule, ...] = ()
+    route_supervision: tuple[RoutePathLabel, ...] = ()
     parameters: tuple[tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
@@ -116,6 +154,16 @@ class TaskPlan:
             isinstance(rule, ObservationRule) for rule in self.observation_rules
         ):
             raise TypeError("observation_rules must contain ObservationRule")
+        if not isinstance(self.route_supervision, tuple) or not all(
+            isinstance(label, RoutePathLabel)
+            for label in self.route_supervision
+        ):
+            raise TypeError("route_supervision must contain RoutePathLabel")
+        route_paths = tuple(
+            label.foreign_key_ids for label in self.route_supervision
+        )
+        if len(set(route_paths)) != len(route_paths):
+            raise ValueError("route_supervision paths must be unique")
         object.__setattr__(self, "parameters", _parameters(self.parameters))
         self._validate_mechanism_contract()
 
@@ -184,6 +232,9 @@ class TaskPlan:
             "observation_rules": [
                 rule.to_dict() for rule in self.observation_rules
             ],
+            "route_supervision": [
+                label.to_dict() for label in self.route_supervision
+            ],
             "parameters": dict(self.parameters),
         }
 
@@ -209,6 +260,10 @@ class TaskPlan:
             observation_rules=tuple(
                 ObservationRule.from_dict(item)
                 for item in data.get("observation_rules", ())
+            ),
+            route_supervision=tuple(
+                RoutePathLabel.from_dict(item)
+                for item in data.get("route_supervision", ())
             ),
             parameters=tuple(data.get("parameters", {}).items()),
         )
@@ -283,6 +338,8 @@ def _parameters(
 __all__ = [
     "TaskMechanism",
     "PredictionType",
+    "RouteRole",
+    "RoutePathLabel",
     "ObservationRule",
     "TaskPlan",
     "TaskData",

@@ -376,6 +376,50 @@ examples are deterministically split into DBB train/validation sets; query
 examples become the test set. NPZ compression is enabled by default to limit
 the extra on-disk copy.
 
+## Sparse MLP router
+
+The optional sparse route replaces DFS without changing stages 01--03. It
+builds typed cell tokens, retains one output token per target column, creates a
+task context from support rows and support labels only, scores at most 20
+depth-2 schema paths with an MLP, executes the top three paths, and selects at
+most eight observable source columns per path. Related rows are sampled with a
+bounded fanout and aggregated independently for every path--source-column
+pair. These relation-column tokens and the original target-column tokens feed
+the jointly trained PFN-style transformer; no path latent slots are used.
+Each PFN episode is capped at 600 support-plus-query rows; query subsampling is
+label-blind.
+
+The objective is:
+
+```text
+L = L_query-pred
+  + lambda_route * L_route
+  + lambda_cost * L_cost
+  + lambda_sparse * L_sparse
+  + lambda_diversity * L_diversity
+```
+
+`L_route` reads required/optional/distractor path labels from the synthetic
+Task DSL. Generator-private table roles, motifs, SCM families and relation
+strategies never enter model features. Query labels enter only
+`L_query-pred`; schema/database IDs, rather than individual tasks, determine
+the validation split.
+
+Install the optional model dependency and run:
+
+```bash
+pip install -e '.[router]'
+bash scripts/v1/04b_router_train.sh configs/refactor_v2.yaml
+bash scripts/v1/05_routed_h5.sh configs/refactor_v2.yaml
+```
+
+Checkpoints are written below `OUTPUT_DIR/router/checkpoints/`. The H5 file at
+`OUTPUT_DIR/routed/routed_tasks.h5` stores per-task target tokens, selected
+relation-column tokens and masks, support/query mask, labels, route/column
+scores, selected indices, observable path descriptors and measured costs.
+Because token widths vary by task, each task is an H5 group rather than one
+globally padded DFS matrix.
+
 Run RDBPFN depth-1 DFS on every exported task dataset from the RDBPFN
 `data_preprocessing` directory:
 

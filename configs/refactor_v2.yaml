@@ -185,6 +185,56 @@ rdbpfn_export:
   h5_max_columns: 60
   h5_seed: 42
 
+# Trainable DFS replacement. Routing uses support labels only; query labels are
+# consumed exclusively by the prediction loss.
+path_router:
+  max_path_depth: 2
+  max_candidates: 20
+  top_k_paths: 3
+  max_source_columns: 8
+  min_rows_per_hop: 16
+  rows_per_hop: 32
+  max_target_columns: 32
+  max_rows_per_task: 600
+
+  token_dim: 64
+  type_embedding_dim: 16
+  path_feature_dim: 8
+  column_feature_dim: 8
+  router_hidden_dim: 128
+  transformer_heads: 4
+  transformer_layers: 2
+  dropout: 0.10
+  max_classes: 16
+  aggregation: set
+  temperature: 1.0
+
+  epochs: 10
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  validation_fraction: 0.10
+  task_count: null
+  start_index: 0
+  seed: 42
+  device: auto
+  lambda_route: 1.0
+  lambda_cost: 0.05
+  lambda_sparse: 0.05
+  lambda_diversity: 0.05
+  overwrite: false
+  progress_every: 50
+
+routed_h5:
+  # Defaults resolve to router/checkpoints/best.pt and
+  # routed/routed_tasks.h5 under paths.output_root.
+  checkpoint: outputs/refactor_v2/router/checkpoints/best.pt
+  output_path: outputs/refactor_v2/routed/routed_tasks.h5
+  task_count: null
+  start_index: 0
+  device: auto
+  overwrite: false
+
 # Hard invariants are intentionally not switches: connectivity, FK DAG,
 # self-loop/parallel-FK prohibition, rank ordering, role-edge legality,
 # Entity/Event presence, Bridge parent count, and validation contracts.

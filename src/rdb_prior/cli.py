@@ -12,11 +12,15 @@ from typing import Sequence
 from rdb_prior.config import (
     InstanceConfigOverrides,
     RDBPFNExportConfigOverrides,
+    RoutedH5ConfigOverrides,
+    RouterTrainingConfigOverrides,
     SchemaConfigError,
     SchemaConfigOverrides,
     TaskConfigOverrides,
     load_instance_pipeline_config,
     load_rdbpfn_export_config,
+    load_routed_h5_config,
+    load_router_training_config,
     load_schema_pipeline_config,
     load_task_pipeline_config,
 )
@@ -231,6 +235,48 @@ def _build_parser() -> argparse.ArgumentParser:
     export.add_argument("--h5-seed", type=int, default=None)
     export.add_argument("--validate-config-only", action="store_true")
     _add_observability_arguments(export)
+
+    router = subparsers.add_parser(
+        "router-train",
+        help="train the supervised sparse MLP path router and PFN backend",
+    )
+    router.add_argument(
+        "--config", type=Path, default=Path("configs/refactor_v2.yaml")
+    )
+    router.add_argument("--task-manifest", type=Path, default=None)
+    router.add_argument("--output-dir", type=Path, default=None)
+    router.add_argument("--count", dest="task_count", type=int, default=None)
+    router.add_argument("--start-index", type=int, default=None)
+    router.add_argument("--epochs", type=int, default=None)
+    router.add_argument(
+        "--device", choices=("auto", "cpu", "cuda", "mps"), default=None
+    )
+    router.add_argument(
+        "--overwrite", action=argparse.BooleanOptionalAction, default=None
+    )
+    router.add_argument("--validate-config-only", action="store_true")
+    _add_observability_arguments(router)
+
+    routed_h5 = subparsers.add_parser(
+        "routed-h5",
+        help="export selected relation-column tokens from a router checkpoint",
+    )
+    routed_h5.add_argument(
+        "--config", type=Path, default=Path("configs/refactor_v2.yaml")
+    )
+    routed_h5.add_argument("--task-manifest", type=Path, default=None)
+    routed_h5.add_argument("--checkpoint", type=Path, default=None)
+    routed_h5.add_argument("--output", dest="output_path", type=Path, default=None)
+    routed_h5.add_argument("--count", dest="task_count", type=int, default=None)
+    routed_h5.add_argument("--start-index", type=int, default=None)
+    routed_h5.add_argument(
+        "--device", choices=("auto", "cpu", "cuda", "mps"), default=None
+    )
+    routed_h5.add_argument(
+        "--overwrite", action=argparse.BooleanOptionalAction, default=None
+    )
+    routed_h5.add_argument("--validate-config-only", action="store_true")
+    _add_observability_arguments(routed_h5)
     return parser
 
 
@@ -567,6 +613,117 @@ def _run_rdbpfn_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_router_train(args: argparse.Namespace) -> int:
+    logger = configure_logging(
+        level=args.log_level, log_file=args.log_file
+    ).getChild("router-train")
+    config = load_router_training_config(
+        args.config,
+        overrides=RouterTrainingConfigOverrides(
+            task_manifest=args.task_manifest,
+            output_root=args.output_dir,
+            task_count=args.task_count,
+            start_index=args.start_index,
+            epochs=args.epochs,
+            device=args.device,
+            overwrite=args.overwrite,
+        ),
+    )
+    if args.validate_config_only:
+        print(json.dumps(config.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
+        close_logging()
+        return 0
+    from rdb_prior.routing.trainer import train_sparse_router
+
+    reporter = ProgressReporter(
+        stage="router-train",
+        logger=logger,
+        log_every=config.progress_every,
+        enabled=args.progress,
+        width=args.progress_width,
+    )
+    try:
+        result = train_sparse_router(
+            config,
+            progress=lambda completed, total, task_id: reporter.update(
+                completed, total, task_id
+            ),
+        )
+    except Exception:
+        logger.exception("sparse router training failed")
+        raise
+    finally:
+        reporter.close()
+        close_logging()
+    print(
+        json.dumps(
+            {
+                "best_checkpoint": str(result.best_checkpoint),
+                "last_checkpoint": str(result.last_checkpoint),
+                "metrics": str(result.metrics_path),
+                "train_task_count": result.train_task_count,
+                "validation_task_count": result.validation_task_count,
+                "best_validation_loss": result.best_validation_loss,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _run_routed_h5(args: argparse.Namespace) -> int:
+    logger = configure_logging(
+        level=args.log_level, log_file=args.log_file
+    ).getChild("routed-h5")
+    config = load_routed_h5_config(
+        args.config,
+        overrides=RoutedH5ConfigOverrides(
+            task_manifest=args.task_manifest,
+            checkpoint=args.checkpoint,
+            output_path=args.output_path,
+            task_count=args.task_count,
+            start_index=args.start_index,
+            device=args.device,
+            overwrite=args.overwrite,
+        ),
+    )
+    if args.validate_config_only:
+        print(json.dumps(config.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
+        close_logging()
+        return 0
+    from rdb_prior.export.routed_h5 import export_routed_h5
+
+    reporter = ProgressReporter(
+        stage="routed-h5",
+        logger=logger,
+        log_every=50,
+        enabled=args.progress,
+        width=args.progress_width,
+    )
+    try:
+        result = export_routed_h5(
+            config,
+            progress=lambda completed, total, task_id: reporter.update(
+                completed, total, task_id
+            ),
+        )
+    except Exception:
+        logger.exception("routed H5 export failed")
+        raise
+    finally:
+        reporter.close()
+        close_logging()
+    print(
+        json.dumps(
+            {"output": str(result.output_path), "task_count": result.task_count},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -588,6 +745,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "rdbpfn-export":
         try:
             return _run_rdbpfn_export(args)
+        except SchemaConfigError as error:
+            parser.error(str(error))
+    if args.command == "router-train":
+        try:
+            return _run_router_train(args)
+        except SchemaConfigError as error:
+            parser.error(str(error))
+    if args.command == "routed-h5":
+        try:
+            return _run_routed_h5(args)
         except SchemaConfigError as error:
             parser.error(str(error))
     parser.error(f"Unknown command: {args.command}")

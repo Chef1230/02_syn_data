@@ -19,6 +19,8 @@ from rdb_prior.task.model import (
     ObservationRule,
     PlannedTask,
     PredictionType,
+    RoutePathLabel,
+    RouteRole,
     TaskData,
     TaskMechanism,
     TaskPlan,
@@ -171,6 +173,19 @@ def build_relation_attribute_task(
         split_strategy=split_strategy,
         seed=seed,
         masked_column_ids=(column.column_id,),
+        route_supervision=_schema_route_labels(
+            schema,
+            target_table_id=table.table_id,
+            optional_paths=tuple(
+                (foreign_key.foreign_key_id,)
+                for foreign_key in schema.foreign_keys
+                if table.table_id
+                in {
+                    foreign_key.parent_table_id,
+                    foreign_key.child_table_id,
+                }
+            ),
+        ),
         parameters=(("support_fraction", support_fraction),),
     )
     return PlannedTask(
@@ -271,6 +286,11 @@ def build_future_event_existence_task(
         split_strategy="stratified_entities",
         seed=seed,
         observation_rules=observation_rules,
+        route_supervision=_schema_route_labels(
+            schema,
+            target_table_id=candidate.entity_table_id,
+            required_paths=((candidate.foreign_key_id,),),
+        ),
         parameters=(
             ("cutoff_quantile", cutoff_quantile),
             ("horizon_fraction", horizon_fraction),
@@ -401,6 +421,58 @@ def _foreign_key(
         if foreign_key.foreign_key_id == foreign_key_id:
             return foreign_key
     raise KeyError(f"PhysicalSchema has no FK {foreign_key_id!r}")
+
+
+def _schema_route_labels(
+    schema: PhysicalSchema,
+    *,
+    target_table_id: str,
+    required_paths: tuple[tuple[str, ...], ...] = (),
+    optional_paths: tuple[tuple[str, ...], ...] = (),
+    max_depth: int = 2,
+) -> tuple[RoutePathLabel, ...]:
+    """Materialize required/optional/distractor labels in the Task DSL."""
+    required = set(required_paths)
+    optional = set(optional_paths)
+    adjacent: dict[str, list[tuple[str, str]]] = {
+        table.table_id: [] for table in schema.tables
+    }
+    for foreign_key in schema.foreign_keys:
+        adjacent[foreign_key.parent_table_id].append(
+            (foreign_key.foreign_key_id, foreign_key.child_table_id)
+        )
+        adjacent[foreign_key.child_table_id].append(
+            (foreign_key.foreign_key_id, foreign_key.parent_table_id)
+        )
+    for values in adjacent.values():
+        values.sort()
+    frontier = [(target_table_id, (), frozenset({target_table_id}))]
+    paths: list[tuple[str, ...]] = []
+    for _depth in range(max_depth):
+        following: list[tuple[str, tuple[str, ...], frozenset[str]]] = []
+        for current, path, visited in frontier:
+            for foreign_key_id, destination in adjacent[current]:
+                if destination in visited:
+                    continue
+                candidate = path + (foreign_key_id,)
+                paths.append(candidate)
+                following.append(
+                    (destination, candidate, visited | {destination})
+                )
+        frontier = following
+    return tuple(
+        RoutePathLabel(
+            foreign_key_ids=path,
+            role=(
+                RouteRole.REQUIRED
+                if path in required
+                else RouteRole.OPTIONAL
+                if path in optional
+                else RouteRole.DISTRACTOR
+            ),
+        )
+        for path in paths
+    )
 
 
 __all__ = [

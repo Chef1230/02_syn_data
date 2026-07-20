@@ -22,6 +22,11 @@ from rdb_prior.export.pipeline import RDBPFNExportConfig
 from rdb_prior.instance.plan import FeatureSCMFamily
 from rdb_prior.instance.planner import InstancePlannerConfig
 from rdb_prior.pipeline import InstancePipelineConfig, SchemaPipelineConfig
+from rdb_prior.routing.config import (
+    RoutedH5Config,
+    RouterModelConfig,
+    RouterTrainingConfig,
+)
 from rdb_prior.schema.graph import SchemaGraphConfig
 from rdb_prior.schema.sampler import BlueprintSampler, BlueprintSamplerConfig
 from rdb_prior.schema.spec import TableRole
@@ -41,6 +46,8 @@ _PATH_OPTIONS = {
     "task_output_root",
     "task_manifest",
     "rdbpfn_output_root",
+    "router_output_root",
+    "routed_output_root",
 }
 
 
@@ -124,6 +131,28 @@ class RDBPFNExportConfigOverrides:
     h5_seed: int | None = None
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RouterTrainingConfigOverrides:
+    task_manifest: Path | None = None
+    output_root: Path | None = None
+    task_count: int | None = None
+    start_index: int | None = None
+    epochs: int | None = None
+    device: str | None = None
+    overwrite: bool | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RoutedH5ConfigOverrides:
+    task_manifest: Path | None = None
+    checkpoint: Path | None = None
+    output_path: Path | None = None
+    task_count: int | None = None
+    start_index: int | None = None
+    device: str | None = None
+    overwrite: bool | None = None
+
+
 def load_schema_pipeline_config(
     path: str | Path,
     *,
@@ -149,6 +178,8 @@ def load_schema_pipeline_config(
             "task",
             "task_generation",
             "rdbpfn_export",
+            "path_router",
+            "routed_h5",
         },
         "config",
     )
@@ -226,6 +257,8 @@ def load_schema_pipeline_config(
     _section(root, "task", _TASK_OPTIONS)
     _section(root, "task_generation", _TASK_GENERATION_OPTIONS)
     _section(root, "rdbpfn_export", _RDBPFN_EXPORT_OPTIONS)
+    _section(root, "path_router", _PATH_ROUTER_OPTIONS)
+    _section(root, "routed_h5", _ROUTED_H5_OPTIONS)
 
     cli = overrides or SchemaConfigOverrides()
     if not isinstance(cli, SchemaConfigOverrides):
@@ -540,6 +573,52 @@ _RDBPFN_EXPORT_OPTIONS = {
     "h5_total_rows",
     "h5_max_columns",
     "h5_seed",
+}
+
+_PATH_ROUTER_OPTIONS = {
+    "max_path_depth",
+    "max_candidates",
+    "top_k_paths",
+    "max_source_columns",
+    "rows_per_hop",
+    "min_rows_per_hop",
+    "max_target_columns",
+    "max_rows_per_task",
+    "token_dim",
+    "type_embedding_dim",
+    "path_feature_dim",
+    "column_feature_dim",
+    "router_hidden_dim",
+    "transformer_heads",
+    "transformer_layers",
+    "dropout",
+    "max_classes",
+    "aggregation",
+    "temperature",
+    "epochs",
+    "learning_rate",
+    "weight_decay",
+    "gradient_clip",
+    "validation_fraction",
+    "task_count",
+    "start_index",
+    "seed",
+    "device",
+    "lambda_route",
+    "lambda_cost",
+    "lambda_sparse",
+    "lambda_diversity",
+    "overwrite",
+    "progress_every",
+}
+
+_ROUTED_H5_OPTIONS = {
+    "checkpoint",
+    "output_path",
+    "task_count",
+    "start_index",
+    "device",
+    "overwrite",
 }
 
 
@@ -872,6 +951,131 @@ def load_rdbpfn_export_config(
         ) from error
 
 
+def load_router_training_config(
+    path: str | Path,
+    *,
+    overrides: RouterTrainingConfigOverrides | None = None,
+) -> RouterTrainingConfig:
+    """Load the support-conditioned sparse MLP router configuration."""
+    config_path = Path(path).resolve()
+    load_task_pipeline_config(config_path)
+    root = _mapping(_load_document(config_path), "config")
+    paths = _section(root, "paths", _PATH_OPTIONS)
+    router = _section(root, "path_router", _PATH_ROUTER_OPTIONS)
+    cli = overrides or RouterTrainingConfigOverrides()
+    if not isinstance(cli, RouterTrainingConfigOverrides):
+        raise TypeError(
+            "overrides must be RouterTrainingConfigOverrides or None"
+        )
+    task_output = _stage_output_path(paths, "task")
+    task_manifest = _stage_manifest_path(paths, "task", task_output)
+    router_output = _stage_output_path(paths, "router")
+    model_defaults = RouterModelConfig()
+    try:
+        model = RouterModelConfig(
+            **{
+                name: router.get(name, getattr(model_defaults, name))
+                for name in model_defaults.__dataclass_fields__
+            }
+        )
+        return RouterTrainingConfig(
+            task_manifest=_resolve_output_root(
+                config_path=config_path,
+                configured=task_manifest,
+                override=cli.task_manifest,
+            ),
+            output_root=_resolve_output_root(
+                config_path=config_path,
+                configured=router_output,
+                override=cli.output_root,
+            ),
+            model=model,
+            epochs=_override(cli.epochs, router.get("epochs", 10)),
+            learning_rate=router.get("learning_rate", 3e-4),
+            weight_decay=router.get("weight_decay", 1e-4),
+            gradient_clip=router.get("gradient_clip", 1.0),
+            validation_fraction=router.get("validation_fraction", 0.1),
+            task_count=_override(cli.task_count, router.get("task_count")),
+            start_index=_override(
+                cli.start_index, router.get("start_index", 0)
+            ),
+            seed=router.get("seed", root.get("seed", 42)),
+            device=_override(cli.device, router.get("device", "auto")),
+            lambda_route=router.get("lambda_route", 1.0),
+            lambda_cost=router.get("lambda_cost", 0.05),
+            lambda_sparse=router.get("lambda_sparse", 0.05),
+            lambda_diversity=router.get("lambda_diversity", 0.05),
+            overwrite=_override(
+                cli.overwrite, router.get("overwrite", False)
+            ),
+            progress_every=router.get("progress_every", 50),
+        )
+    except (TypeError, ValueError) as error:
+        raise SchemaConfigError(
+            f"Invalid sparse router config {config_path}: {error}"
+        ) from error
+
+
+def load_routed_h5_config(
+    path: str | Path,
+    *,
+    overrides: RoutedH5ConfigOverrides | None = None,
+) -> RoutedH5Config:
+    """Load token-native H5 export configuration."""
+    config_path = Path(path).resolve()
+    load_task_pipeline_config(config_path)
+    root = _mapping(_load_document(config_path), "config")
+    paths = _section(root, "paths", _PATH_OPTIONS)
+    routed = _section(root, "routed_h5", _ROUTED_H5_OPTIONS)
+    cli = overrides or RoutedH5ConfigOverrides()
+    if not isinstance(cli, RoutedH5ConfigOverrides):
+        raise TypeError("overrides must be RoutedH5ConfigOverrides or None")
+    task_output = _stage_output_path(paths, "task")
+    task_manifest = _stage_manifest_path(paths, "task", task_output)
+    router_output = _stage_output_path(paths, "router")
+    routed_output = _stage_output_path(paths, "routed")
+    checkpoint_value = routed.get(
+        "checkpoint", router_output / "checkpoints" / "best.pt"
+    )
+    output_value = routed.get(
+        "output_path", routed_output / "routed_tasks.h5"
+    )
+    if not isinstance(checkpoint_value, (str, Path)):
+        raise SchemaConfigError("config.routed_h5.checkpoint must be a path")
+    if not isinstance(output_value, (str, Path)):
+        raise SchemaConfigError("config.routed_h5.output_path must be a path")
+    try:
+        return RoutedH5Config(
+            task_manifest=_resolve_output_root(
+                config_path=config_path,
+                configured=task_manifest,
+                override=cli.task_manifest,
+            ),
+            checkpoint=_resolve_output_root(
+                config_path=config_path,
+                configured=Path(checkpoint_value),
+                override=cli.checkpoint,
+            ),
+            output_path=_resolve_output_root(
+                config_path=config_path,
+                configured=Path(output_value),
+                override=cli.output_path,
+            ),
+            task_count=_override(cli.task_count, routed.get("task_count")),
+            start_index=_override(
+                cli.start_index, routed.get("start_index", 0)
+            ),
+            device=_override(cli.device, routed.get("device", "auto")),
+            overwrite=_override(
+                cli.overwrite, routed.get("overwrite", False)
+            ),
+        )
+    except (TypeError, ValueError) as error:
+        raise SchemaConfigError(
+            f"Invalid routed H5 config {config_path}: {error}"
+        ) from error
+
+
 def _load_document(path: Path) -> Any:
     if not path.is_file():
         raise SchemaConfigError(f"Config file does not exist: {path}")
@@ -1111,8 +1315,12 @@ __all__ = [
     "InstanceConfigOverrides",
     "TaskConfigOverrides",
     "RDBPFNExportConfigOverrides",
+    "RouterTrainingConfigOverrides",
+    "RoutedH5ConfigOverrides",
     "load_schema_pipeline_config",
     "load_instance_pipeline_config",
     "load_task_pipeline_config",
     "load_rdbpfn_export_config",
+    "load_router_training_config",
+    "load_routed_h5_config",
 ]
