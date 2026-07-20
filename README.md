@@ -13,6 +13,17 @@ The schema command reads `configs/refactor_v1.yaml`. The reference config is
 derived from the schema-related priors in `syn_data/configs/default.yaml` and
 contains only options implemented by the current four-stage pipeline.
 
+`configs/refactor_v2.yaml` is the complete production-size preset: 20k
+schemas, eight stage-02 workers, two tasks per database, and every DBB/DFS/H5
+switch exposed. Run all stages with:
+
+```bash
+bash scripts/v1/generate_v1.sh configs/refactor_v2.yaml
+```
+
+H5 remains disabled in that preset until `rdbpfn_export.h5_enabled` is set to
+`true`, because it requires the external RDBPFN preprocessing environment.
+
 ```bash
 bash scripts/v1/01_schema.sh
 ```
@@ -27,7 +38,7 @@ Generate a small isolated test batch:
 
 ```bash
 NUM_SCHEMAS=5 \
-OUTPUT_DIR=outputs/schema_smoke \
+OUTPUT_DIR=outputs/smoke \
 OVERWRITE=1 \
 bash scripts/v1/01_schema.sh
 ```
@@ -37,7 +48,7 @@ Run the intended 20k schema feasibility batch:
 ```bash
 NUM_SCHEMAS=20000 \
 BASE_SEED=42 \
-OUTPUT_DIR=outputs/schema_v1_20k \
+OUTPUT_DIR=outputs/v1_20k \
 OVERWRITE=0 \
 bash scripts/v1/01_schema.sh
 ```
@@ -79,8 +90,8 @@ SCHEMA_GRAPH_FORMAT=png bash scripts/v1/01_schema.sh
 An existing DOT artifact can also be rendered manually:
 
 ```bash
-dot -Tpng outputs/schema_v1_sample/schema_graphs/sample_000000.dot \
-  -o outputs/schema_v1_sample/schema_graphs/sample_000000.png
+dot -Tpng outputs/v1_sample/schema/schema_graphs/sample_000000.dot \
+  -o outputs/v1_sample/schema/schema_graphs/sample_000000.png
 ```
 
 Generate instances for the schema manifest configured in the YAML:
@@ -92,16 +103,19 @@ bash scripts/v1/02_instance.sh
 The most common stage-02 overrides are:
 
 ```bash
-SCHEMA_MANIFEST=outputs/schema_v1_20k/manifest.json \
-INSTANCE_OUTPUT_DIR=outputs/instance_v1_20k \
+OUTPUT_DIR=outputs/v1_20k \
 NUM_INSTANCES=20000 \
+INSTANCE_JOBS=8 \
 OVERWRITE=0 \
 bash scripts/v1/02_instance.sh
 ```
 
 `START_INDEX`, `SHARD_ID`, `NUM_SHARDS`, `PROGRESS_EVERY`, `CONFIG_PATH`,
-`PYTHON_BIN`, and `VALIDATE_CONFIG_ONLY` are also supported. The direct entry
-point is `rdb-prior instance`.
+`PYTHON_BIN`, and `VALIDATE_CONFIG_ONLY` are also supported. `INSTANCE_JOBS`
+(or its `JOBS` alias) overrides `instance_generation.num_workers`; each worker
+generates, validates, and atomically stores one database. Results are sorted
+back into schema-manifest order before the parent process writes the manifest.
+The direct entry point is `rdb-prior instance --jobs 8`.
 
 Generate tasks for the configured instance manifest:
 
@@ -112,8 +126,7 @@ bash scripts/v1/03_task.sh
 Control the exact requested task count per selected database:
 
 ```bash
-INSTANCE_MANIFEST=outputs/instance_v1_20k/manifest.json \
-TASK_OUTPUT_DIR=outputs/task_v1_20k \
+OUTPUT_DIR=outputs/v1_20k \
 NUM_DATABASES=20000 \
 TASKS_PER_DATABASE=2 \
 OVERWRITE=0 \
@@ -133,8 +146,7 @@ bash scripts/v1/04_rdbpfn_export.sh
 The common stage-04 overrides are:
 
 ```bash
-TASK_MANIFEST=outputs/task_v1_20k/manifest.json \
-RDBPFN_OUTPUT_DIR=outputs/rdbpfn_v1_20k \
+OUTPUT_DIR=outputs/v1_20k \
 NUM_EXPORTS=40000 \
 VALIDATION_FRACTION=0.2 \
 COMPRESS=1 \
@@ -150,8 +162,7 @@ Optionally run RDBPFN DFS and package the processed classification tasks into
 the H5 format consumed by its pretraining dataloader:
 
 ```bash
-TASK_MANIFEST=outputs/task_v1_20k/manifest.json \
-RDBPFN_OUTPUT_DIR=outputs/rdbpfn_v1_20k \
+OUTPUT_DIR=outputs/v1_20k \
 H5_EXPORT=1 \
 RDBPFN_PREPROCESSING_DIR=../RDBPFN/data_preprocessing \
 DFS_DEPTH=1 \
@@ -162,10 +173,11 @@ OVERWRITE=0 \
 bash scripts/v1/04_rdbpfn_export.sh
 ```
 
-`OUTPUT_DIR` remains an alias for `RDBPFN_OUTPUT_DIR`. Unless `H5_OUTPUT` is
-set, the H5 file follows that directory and is written as `rdbpfn_tasks.h5`
-(with a shard suffix for sharded runs). Set `H5_RUN_DFS=0` to package an
-already existing `<RDBPFN_OUTPUT_DIR>-processed` tree. Other H5 overrides are
+`OUTPUT_DIR` is the run root for every stage. Stage 04 therefore writes to
+`<OUTPUT_DIR>/rdbpfn`; unless `H5_OUTPUT` is set, its H5 file is written there
+as `rdbpfn_tasks.h5` (with a shard suffix for sharded runs). Set
+`H5_RUN_DFS=0` to package an already existing
+`<OUTPUT_DIR>/rdbpfn-processed` tree. Other H5 overrides are
 `H5_SEED`; `DFS_DEPTH` accepts 1 or 2. The current RDBPFN H5 training contract
 is classification-only, so regression tasks remain available as DBB datasets
 but are reported as skipped by the H5 packer.
@@ -173,8 +185,19 @@ but are reported as skipped by the H5 packer.
 Run all four configured stages with:
 
 ```bash
-bash scripts/v1/generate_v1.sh
+OUTPUT_DIR=outputs/v1_20k bash scripts/v1/generate_v1.sh
 ```
+
+The YAML equivalent is a single path setting:
+
+```yaml
+paths:
+  output_root: outputs/v1_20k
+```
+
+The default stage directories are `schema/`, `instance/`, `task/`, and
+`rdbpfn/` beneath that root. `SCHEMA_OUTPUT_DIR`, `INSTANCE_OUTPUT_DIR`,
+`TASK_OUTPUT_DIR`, and `RDBPFN_OUTPUT_DIR` remain exact stage-level overrides.
 
 ## Logging and progress
 
@@ -211,7 +234,8 @@ unknown motif names, overlapping feature-column ranges and inconsistent
 value/weight lists.
 
 - `seed`: deterministic root seed.
-- `paths`: schema artifact output root.
+- `paths.output_root`: run root; stage directories and their manifest paths
+  are derived automatically.
 - `generation`: batch size, index range, artifact ID prefix, progress,
   overwrite behavior and project version.
 - `schema_graph`: DOT creation, optional Graphviz rendering format and whether
@@ -248,7 +272,7 @@ belong to later Task/Process stages.
 ## Output
 
 ```text
-OUTPUT_DIR/
+OUTPUT_DIR/schema/
   manifest.json
   schemas/
     sample_000000.json
@@ -276,7 +300,7 @@ Stage 01 stops at `CompilationResult(PhysicalSchema, CompilationTrace)`.
 The stage-02 output is:
 
 ```text
-INSTANCE_OUTPUT_DIR/
+OUTPUT_DIR/instance/
   manifest.json
   instances/sample_000000/
     artifact.json
@@ -300,7 +324,7 @@ The instance artifact can be loaded with
 The stage-03 output is:
 
 ```text
-TASK_OUTPUT_DIR/
+OUTPUT_DIR/task/
   manifest.json
   tasks/sample_000000/task_sample_000000_000/
     artifact.json
@@ -324,7 +348,7 @@ of silently reducing the count. Load artifacts with
 The stage-04 output is directly loadable by RDBPFN:
 
 ```text
-RDBPFN_OUTPUT_DIR/
+OUTPUT_DIR/rdbpfn/
   manifest.json
   task_sample_000000_000/
     metadata.yaml
@@ -339,7 +363,7 @@ RDBPFN_OUTPUT_DIR/
 ```
 
 DFS writes relational features to the sibling directory
-`RDBPFN_OUTPUT_DIR-processed/`. H5 rows keep train+validation (support) before
+`OUTPUT_DIR/rdbpfn-processed/`. H5 rows keep train+validation (support) before
 test (query), and `single_eval_pos` stores that boundary. The writer streams
 one processed task at a time, so packaging does not retain the whole corpus in
 memory.
@@ -358,7 +382,7 @@ Run RDBPFN depth-1 DFS on every exported task dataset from the RDBPFN
 ```bash
 cd ../RDBPFN/data_preprocessing
 bash benchmark_preprocess_depth1.sh \
-  ../../02_syn_data/outputs/rdbpfn_v1_sample 8
+  ../../02_syn_data/outputs/v1_sample/rdbpfn 8
 ```
 
 Use `benchmark_preprocess_depth2.sh` in the same way for depth 2.

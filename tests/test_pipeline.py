@@ -6,6 +6,8 @@ import sys
 import tempfile
 import unittest
 
+import numpy as np
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -101,6 +103,7 @@ class SchemaPipelineTests(unittest.TestCase):
                 InstancePipelineConfig(
                     schema_manifest=schema_result.manifest_path,
                     output_root=root / "instance",
+                    num_workers=2,
                     progress_every=1,
                     planner=InstancePlannerConfig(
                         entity_rows_min=16,
@@ -113,6 +116,16 @@ class SchemaPipelineTests(unittest.TestCase):
             )
 
             self.assertEqual(2, result.generated_count)
+            schema_manifest = json.loads(
+                schema_result.manifest_path.read_text(encoding="utf-8")
+            )
+            instance_manifest = json.loads(
+                result.manifest_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                [entry["sample_id"] for entry in schema_manifest["entries"]],
+                [entry["sample_id"] for entry in instance_manifest["entries"]],
+            )
             for artifact_path in result.artifact_paths:
                 artifact = load_instance_artifact(artifact_path)
                 self.assertTrue(artifact.validation.is_valid)
@@ -121,6 +134,43 @@ class SchemaPipelineTests(unittest.TestCase):
                     artifact.database.schema_id,
                 )
                 self.assertTrue(artifact.database.tables)
+
+            serial_result = generate_database_instances(
+                InstancePipelineConfig(
+                    schema_manifest=schema_result.manifest_path,
+                    output_root=root / "instance_serial",
+                    num_workers=1,
+                    planner=InstancePlannerConfig(
+                        entity_rows_min=16,
+                        entity_rows_max=20,
+                        lookup_rows_min=3,
+                        lookup_rows_max=5,
+                        max_rows_per_table=48,
+                    ),
+                )
+            )
+            for parallel_path, serial_path in zip(
+                result.artifact_paths,
+                serial_result.artifact_paths,
+                strict=True,
+            ):
+                parallel = load_instance_artifact(parallel_path)
+                serial = load_instance_artifact(serial_path)
+                self.assertEqual(parallel.plan.to_dict(), serial.plan.to_dict())
+                for parallel_table, serial_table in zip(
+                    parallel.database.tables,
+                    serial.database.tables,
+                    strict=True,
+                ):
+                    self.assertEqual(
+                        set(parallel_table.columns),
+                        set(serial_table.columns),
+                    )
+                    for column_id in parallel_table.columns:
+                        np.testing.assert_array_equal(
+                            parallel_table.columns[column_id],
+                            serial_table.columns[column_id],
+                        )
 
     def test_instance_shards_share_output_without_manifest_collision(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

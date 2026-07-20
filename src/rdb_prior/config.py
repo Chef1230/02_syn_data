@@ -31,6 +31,17 @@ from rdb_prior.task.planner import TaskPlannerConfig
 
 
 _CONFIG_VERSION = 1
+_PATH_OPTIONS = {
+    "output_root",
+    # Legacy stage-specific keys remain loadable for existing run configs.
+    "schema_output_root",
+    "schema_manifest",
+    "instance_output_root",
+    "instance_manifest",
+    "task_output_root",
+    "task_manifest",
+    "rdbpfn_output_root",
+}
 
 
 class SchemaConfigError(ValueError):
@@ -71,6 +82,7 @@ class InstanceConfigOverrides:
     start_index: int | None = None
     shard_id: int | None = None
     num_shards: int | None = None
+    num_workers: int | None = None
     progress_every: int | None = None
     overwrite: bool | None = None
 
@@ -153,15 +165,7 @@ def load_schema_pipeline_config(
     paths = _section(
         root,
         "paths",
-        {
-            "schema_output_root",
-            "schema_manifest",
-            "instance_output_root",
-            "instance_manifest",
-            "task_output_root",
-            "task_manifest",
-            "rdbpfn_output_root",
-        },
+        _PATH_OPTIONS,
     )
     generation = _section(
         root,
@@ -281,17 +285,10 @@ def load_schema_pipeline_config(
         "config.physical_design.primary_key_names",
     )
 
-    output_value = paths.get(
-        "schema_output_root",
-        "outputs/schema_v1",
-    )
-    if not isinstance(output_value, (str, Path)):
-        raise SchemaConfigError(
-            "config.paths.schema_output_root must be a path string"
-        )
+    output_value = _stage_output_path(paths, "schema")
     output_root = _resolve_output_root(
         config_path=config_path,
-        configured=Path(output_value),
+        configured=output_value,
         override=cli.output_root,
     )
 
@@ -491,6 +488,7 @@ _INSTANCE_GENERATION_OPTIONS = {
     "start_index",
     "shard_id",
     "num_shards",
+    "num_workers",
     "progress_every",
     "overwrite",
     "project_version",
@@ -559,15 +557,7 @@ def load_instance_pipeline_config(
     paths = _section(
         root,
         "paths",
-        {
-            "schema_output_root",
-            "schema_manifest",
-            "instance_output_root",
-            "instance_manifest",
-            "task_output_root",
-            "task_manifest",
-            "rdbpfn_output_root",
-        },
+        _PATH_OPTIONS,
     )
     instance = _section(root, "instance", _INSTANCE_OPTIONS)
     generation = _section(
@@ -595,18 +585,13 @@ def load_instance_pipeline_config(
                 f"Invalid config.instance.scm_weights: {error}"
             ) from error
 
-    schema_output = paths.get("schema_output_root", "outputs/schema_v1")
-    schema_manifest_value = paths.get(
-        "schema_manifest",
-        str(Path(schema_output) / "manifest.json"),
+    schema_output = _stage_output_path(paths, "schema")
+    schema_manifest_value = _stage_manifest_path(
+        paths,
+        "schema",
+        schema_output,
     )
-    output_value = paths.get("instance_output_root", "outputs/instance_v1")
-    if not isinstance(schema_manifest_value, (str, Path)):
-        raise SchemaConfigError("config.paths.schema_manifest must be a path string")
-    if not isinstance(output_value, (str, Path)):
-        raise SchemaConfigError(
-            "config.paths.instance_output_root must be a path string"
-        )
+    output_value = _stage_output_path(paths, "instance")
 
     try:
         planner_values = {
@@ -621,12 +606,12 @@ def load_instance_pipeline_config(
         return InstancePipelineConfig(
             schema_manifest=_resolve_output_root(
                 config_path=config_path,
-                configured=Path(schema_manifest_value),
+                configured=schema_manifest_value,
                 override=cli.schema_manifest,
             ),
             output_root=_resolve_output_root(
                 config_path=config_path,
-                configured=Path(output_value),
+                configured=output_value,
                 override=cli.output_root,
             ),
             count=_override(cli.count, generation.get("count")),
@@ -638,6 +623,10 @@ def load_instance_pipeline_config(
             num_shards=_override(
                 cli.num_shards,
                 generation.get("num_shards", 1),
+            ),
+            num_workers=_override(
+                cli.num_workers,
+                generation.get("num_workers", 1),
             ),
             progress_every=_override(
                 cli.progress_every,
@@ -670,15 +659,7 @@ def load_task_pipeline_config(
     paths = _section(
         root,
         "paths",
-        {
-            "schema_output_root",
-            "schema_manifest",
-            "instance_output_root",
-            "instance_manifest",
-            "task_output_root",
-            "task_manifest",
-            "rdbpfn_output_root",
-        },
+        _PATH_OPTIONS,
     )
     task = _section(root, "task", _TASK_OPTIONS)
     generation = _section(
@@ -706,20 +687,13 @@ def load_task_pipeline_config(
                 f"Invalid config.task.mechanism_weights: {error}"
             ) from error
 
-    instance_output = paths.get("instance_output_root", "outputs/instance_v1")
-    manifest_value = paths.get(
-        "instance_manifest",
-        str(Path(instance_output) / "manifest.json"),
+    instance_output = _stage_output_path(paths, "instance")
+    manifest_value = _stage_manifest_path(
+        paths,
+        "instance",
+        instance_output,
     )
-    output_value = paths.get("task_output_root", "outputs/task_v1")
-    if not isinstance(manifest_value, (str, Path)):
-        raise SchemaConfigError(
-            "config.paths.instance_manifest must be a path string"
-        )
-    if not isinstance(output_value, (str, Path)):
-        raise SchemaConfigError(
-            "config.paths.task_output_root must be a path string"
-        )
+    output_value = _stage_output_path(paths, "task")
 
     try:
         planner_values = {
@@ -738,12 +712,12 @@ def load_task_pipeline_config(
         return TaskPipelineConfig(
             instance_manifest=_resolve_output_root(
                 config_path=config_path,
-                configured=Path(manifest_value),
+                configured=manifest_value,
                 override=cli.instance_manifest,
             ),
             output_root=_resolve_output_root(
                 config_path=config_path,
-                configured=Path(output_value),
+                configured=output_value,
                 override=cli.output_root,
             ),
             database_count=_override(
@@ -790,15 +764,7 @@ def load_rdbpfn_export_config(
     paths = _section(
         root,
         "paths",
-        {
-            "schema_output_root",
-            "schema_manifest",
-            "instance_output_root",
-            "instance_manifest",
-            "task_output_root",
-            "task_manifest",
-            "rdbpfn_output_root",
-        },
+        _PATH_OPTIONS,
     )
     export = _section(root, "rdbpfn_export", _RDBPFN_EXPORT_OPTIONS)
     cli = overrides or RDBPFNExportConfigOverrides()
@@ -807,23 +773,14 @@ def load_rdbpfn_export_config(
             "overrides must be RDBPFNExportConfigOverrides or None"
         )
 
-    task_output = paths.get("task_output_root", "outputs/task_v1")
-    manifest_value = paths.get(
-        "task_manifest",
-        str(Path(task_output) / "manifest.json"),
-    )
-    output_value = paths.get("rdbpfn_output_root", "outputs/rdbpfn_v1")
+    task_output = _stage_output_path(paths, "task")
+    manifest_value = _stage_manifest_path(paths, "task", task_output)
+    output_value = _stage_output_path(paths, "rdbpfn")
     h5_output_value = export.get("h5_output")
     preprocessing_value = export.get(
         "rdbpfn_preprocessing_root",
         "../RDBPFN/data_preprocessing",
     )
-    if not isinstance(manifest_value, (str, Path)):
-        raise SchemaConfigError("config.paths.task_manifest must be a path string")
-    if not isinstance(output_value, (str, Path)):
-        raise SchemaConfigError(
-            "config.paths.rdbpfn_output_root must be a path string"
-        )
     if h5_output_value is not None and not isinstance(
         h5_output_value, (str, Path)
     ):
@@ -845,12 +802,12 @@ def load_rdbpfn_export_config(
         return RDBPFNExportConfig(
             task_manifest=_resolve_output_root(
                 config_path=config_path,
-                configured=Path(manifest_value),
+                configured=manifest_value,
                 override=cli.task_manifest,
             ),
             output_root=_resolve_output_root(
                 config_path=config_path,
-                configured=Path(output_value),
+                configured=output_value,
                 override=cli.output_root,
             ),
             task_count=_override(cli.task_count, export.get("task_count")),
@@ -1084,6 +1041,36 @@ def _role_feature_rules(value: Any) -> tuple[RoleFeatureRule, ...]:
         except (TypeError, ValueError) as error:
             raise SchemaConfigError(f"Invalid {path}: {error}") from error
     return tuple(rules)
+
+
+def _stage_output_path(
+    paths: Mapping[str, Any],
+    stage: str,
+) -> Path:
+    legacy_key = f"{stage}_output_root"
+    if legacy_key in paths:
+        value = paths[legacy_key]
+        field = f"config.paths.{legacy_key}"
+    else:
+        value = paths.get("output_root", "outputs/v1")
+        field = "config.paths.output_root"
+        if isinstance(value, (str, Path)):
+            value = Path(value) / stage
+    if not isinstance(value, (str, Path)):
+        raise SchemaConfigError(f"{field} must be a path string")
+    return Path(value)
+
+
+def _stage_manifest_path(
+    paths: Mapping[str, Any],
+    stage: str,
+    output_path: Path,
+) -> Path:
+    key = f"{stage}_manifest"
+    value = paths.get(key, output_path / "manifest.json")
+    if not isinstance(value, (str, Path)):
+        raise SchemaConfigError(f"config.paths.{key} must be a path string")
+    return Path(value)
 
 
 def _resolve_output_root(

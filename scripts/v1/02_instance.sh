@@ -21,9 +21,13 @@ ARGS=(
 
 if [[ -n "${SCHEMA_MANIFEST:-}" ]]; then
   ARGS+=(--schema-manifest "${SCHEMA_MANIFEST}")
+elif [[ -n "${OUTPUT_DIR:-}" ]]; then
+  ARGS+=(--schema-manifest "${OUTPUT_DIR}/schema/manifest.json")
 fi
-if [[ -n "${INSTANCE_OUTPUT_DIR:-${OUTPUT_DIR:-}}" ]]; then
-  ARGS+=(--output-dir "${INSTANCE_OUTPUT_DIR:-${OUTPUT_DIR}}")
+if [[ -n "${INSTANCE_OUTPUT_DIR:-}" ]]; then
+  ARGS+=(--output-dir "${INSTANCE_OUTPUT_DIR}")
+elif [[ -n "${OUTPUT_DIR:-}" ]]; then
+  ARGS+=(--output-dir "${OUTPUT_DIR}/instance")
 fi
 if [[ -n "${NUM_INSTANCES:-}" ]]; then
   ARGS+=(--count "${NUM_INSTANCES}")
@@ -36,6 +40,9 @@ if [[ -n "${SHARD_ID:-}" ]]; then
 fi
 if [[ -n "${NUM_SHARDS:-}" ]]; then
   ARGS+=(--num-shards "${NUM_SHARDS}")
+fi
+if [[ -n "${INSTANCE_JOBS:-${JOBS:-}}" ]]; then
+  ARGS+=(--jobs "${INSTANCE_JOBS:-${JOBS}}")
 fi
 if [[ -n "${PROGRESS_EVERY:-}" ]]; then
   ARGS+=(--progress-every "${PROGRESS_EVERY}")

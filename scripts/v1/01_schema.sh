@@ -20,8 +20,10 @@ ARGS=(
   --config "${CONFIG_PATH}"
 )
 
-if [[ -n "${SCHEMA_OUTPUT_DIR:-${OUTPUT_DIR:-}}" ]]; then
-  ARGS+=(--output-dir "${SCHEMA_OUTPUT_DIR:-${OUTPUT_DIR}}")
+if [[ -n "${SCHEMA_OUTPUT_DIR:-}" ]]; then
+  ARGS+=(--output-dir "${SCHEMA_OUTPUT_DIR}")
+elif [[ -n "${OUTPUT_DIR:-}" ]]; then
+  ARGS+=(--output-dir "${OUTPUT_DIR}/schema")
 fi
 if [[ -n "${NUM_SCHEMAS:-}" ]]; then
   ARGS+=(--count "${NUM_SCHEMAS}")

@@ -21,9 +21,13 @@ ARGS=(
 
 if [[ -n "${INSTANCE_MANIFEST:-}" ]]; then
   ARGS+=(--instance-manifest "${INSTANCE_MANIFEST}")
+elif [[ -n "${OUTPUT_DIR:-}" ]]; then
+  ARGS+=(--instance-manifest "${OUTPUT_DIR}/instance/manifest.json")
 fi
-if [[ -n "${TASK_OUTPUT_DIR:-${OUTPUT_DIR:-}}" ]]; then
-  ARGS+=(--output-dir "${TASK_OUTPUT_DIR:-${OUTPUT_DIR}}")
+if [[ -n "${TASK_OUTPUT_DIR:-}" ]]; then
+  ARGS+=(--output-dir "${TASK_OUTPUT_DIR}")
+elif [[ -n "${OUTPUT_DIR:-}" ]]; then
+  ARGS+=(--output-dir "${OUTPUT_DIR}/task")
 fi
 if [[ -n "${NUM_DATABASES:-}" ]]; then
   ARGS+=(--database-count "${NUM_DATABASES}")

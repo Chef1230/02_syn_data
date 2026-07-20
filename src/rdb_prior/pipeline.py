@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 import json
 import logging
@@ -191,6 +192,7 @@ class InstancePipelineConfig:
     start_index: int = 0
     shard_id: int = 0
     num_shards: int = 1
+    num_workers: int = 1
     overwrite: bool = False
     progress_every: int = 100
     project_version: str = "instance-pipeline-v1"
@@ -201,7 +203,13 @@ class InstancePipelineConfig:
             raise TypeError("schema_manifest must be pathlib.Path")
         if not isinstance(self.output_root, Path):
             raise TypeError("output_root must be pathlib.Path")
-        for name in ("start_index", "shard_id", "num_shards", "progress_every"):
+        for name in (
+            "start_index",
+            "shard_id",
+            "num_shards",
+            "num_workers",
+            "progress_every",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int):
                 raise TypeError(f"{name} must be an integer")
@@ -215,6 +223,8 @@ class InstancePipelineConfig:
             raise ValueError("start_index and progress_every must be non-negative")
         if self.num_shards < 1 or not 0 <= self.shard_id < self.num_shards:
             raise ValueError("shard_id must satisfy 0 <= shard_id < num_shards")
+        if self.num_workers < 1:
+            raise ValueError("num_workers must be positive")
         if not isinstance(self.overwrite, bool):
             raise TypeError("overwrite must be a boolean")
         if not isinstance(self.planner, InstancePlannerConfig):
@@ -228,6 +238,7 @@ class InstancePipelineConfig:
             "start_index": self.start_index,
             "shard_id": self.shard_id,
             "num_shards": self.num_shards,
+            "num_workers": self.num_workers,
             "overwrite": self.overwrite,
             "progress_every": self.progress_every,
             "project_version": self.project_version,
@@ -254,6 +265,25 @@ class InstancePipelineResult:
     @property
     def generated_count(self) -> int:
         return len(self.artifact_paths)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _InstanceWorkItem:
+    order: int
+    schema_path: Path
+    output_root: Path
+    planner_config: InstancePlannerConfig
+    overwrite: bool
+    project_version: str
+    config_digest: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _InstanceWorkResult:
+    order: int
+    sample_id: str
+    artifact_path: Path
+    manifest_entry: dict[str, object]
 
 
 def generate_physical_schemas(
@@ -451,93 +481,52 @@ def generate_database_instances(
     ]
     configuration = config.to_dict()
     config_digest = digest_config(configuration)
-    planner = InstancePlanner(config.planner)
-    generator = DatabaseGenerator()
     writer = InstanceArtifactWriter(
         output_root=config.output_root,
         overwrite=config.overwrite,
     )
-    artifact_paths: list[Path] = []
-    output_entries: list[dict[str, object]] = []
+    work_items: list[_InstanceWorkItem] = []
+    for order, (_index, entry) in enumerate(selected):
+        if not isinstance(entry, dict):
+            raise ValueError("schema manifest entry must be an object")
+        if "artifact" not in entry:
+            raise ValueError("schema manifest entry is missing artifact")
+        schema_path = (config.schema_manifest.parent / entry["artifact"]).resolve()
+        work_items.append(
+            _InstanceWorkItem(
+                order=order,
+                schema_path=schema_path,
+                output_root=config.output_root,
+                planner_config=config.planner,
+                overwrite=config.overwrite,
+                project_version=config.project_version,
+                config_digest=config_digest,
+            )
+        )
     _LOGGER.info(
-        "starting instance pipeline: selected=%d shard=%d/%d output=%s",
+        "starting instance pipeline: selected=%d workers=%d shard=%d/%d output=%s",
         len(selected),
+        config.num_workers,
         config.shard_id,
         config.num_shards,
         config.output_root,
     )
 
-    for completed, (_index, entry) in enumerate(selected, start=1):
-        if not isinstance(entry, dict):
-            raise ValueError("schema manifest entry must be an object")
-        schema_path = (config.schema_manifest.parent / entry["artifact"]).resolve()
-        artifact = load_schema_artifact(schema_path)
-        runtime = artifact.runtime.restore_context().child("database-instance")
-        schema = artifact.compilation.schema
-        plan = planner.plan(
-            sample_id=artifact.sample_id,
-            schema=schema,
-            runtime=runtime,
-        )
-        plan_report = validate_instance_plan(schema, plan)
-        if not plan_report.is_valid:
-            raise ValueError(
-                f"invalid instance plan for {artifact.sample_id}: "
-                f"{[issue.code for issue in plan_report.issues]}"
-            )
-        database = generator.generate(schema=schema, plan=plan)
-        report = validate_database_instance(schema, plan, database)
-        if not report.is_valid:
-            raise ValueError(
-                f"invalid database instance for {artifact.sample_id}: "
-                f"{[issue.code for issue in report.issues]}"
-            )
-        runtime_record = runtime.record(
-            project_version=config.project_version,
-            config_digest=config_digest,
-            metadata={
-                "stage": "database_instance",
-                "sample_id": artifact.sample_id,
-                "schema_id": schema.schema_id,
-            },
-        )
-        artifact_path = writer.commit(
-            sample_id=artifact.sample_id,
-            schema_artifact=str(schema_path),
-            runtime=runtime_record,
-            schema=schema,
-            plan=plan,
-            database=database,
-            report=report,
-        )
-        artifact_paths.append(artifact_path)
+    results = _run_instance_work_items(
+        work_items,
+        num_workers=config.num_workers,
+        progress=progress,
+    )
+    artifact_paths = [result.artifact_path for result in results]
+    output_entries = [result.manifest_entry for result in results]
+    for result in results:
         _LOGGER.debug(
-            "instance artifact committed: sample_id=%s path=%s tables=%d rows=%d",
-            artifact.sample_id,
-            artifact_path,
-            len(database.tables),
-            sum(table.row_count for table in database.tables),
+            "instance artifact committed: sample_id=%s path=%s tables=%s rows=%s",
+            result.sample_id,
+            result.artifact_path,
+            result.manifest_entry["table_count"],
+            result.manifest_entry["row_count"],
         )
-        output_entries.append(
-            {
-                "sample_id": artifact.sample_id,
-                "artifact": artifact_path.relative_to(config.output_root).as_posix(),
-                "schema_artifact": str(schema_path),
-                "schema_id": schema.schema_id,
-                "plan_id": plan.plan_id,
-                "table_count": len(database.tables),
-                "row_count": sum(table.row_count for table in database.tables),
-                "scm_counts": dict(
-                    sorted(
-                        Counter(
-                            table.feature_family.value for table in plan.tables
-                        ).items()
-                    )
-                ),
-            }
-        )
-        if progress is not None:
-            progress(completed, len(selected), artifact.sample_id)
 
     manifest_path = writer.write_manifest(
         configuration=configuration,
@@ -560,6 +549,106 @@ def generate_database_instances(
         output_root=config.output_root,
         manifest_path=manifest_path,
         artifact_paths=tuple(artifact_paths),
+    )
+
+
+def _run_instance_work_items(
+    work_items: list[_InstanceWorkItem],
+    *,
+    num_workers: int,
+    progress: Callable[[int, int, str], None] | None,
+) -> list[_InstanceWorkResult]:
+    if not work_items:
+        return []
+    results: list[_InstanceWorkResult] = []
+    if num_workers == 1:
+        for completed, item in enumerate(work_items, start=1):
+            result = _generate_one_database_instance(item)
+            results.append(result)
+            if progress is not None:
+                progress(completed, len(work_items), result.sample_id)
+    else:
+        max_workers = min(num_workers, len(work_items))
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(_generate_one_database_instance, item)
+                for item in work_items
+            ]
+            for completed, future in enumerate(as_completed(futures), start=1):
+                result = future.result()
+                results.append(result)
+                if progress is not None:
+                    progress(completed, len(work_items), result.sample_id)
+    results.sort(key=lambda result: result.order)
+    return results
+
+
+def _generate_one_database_instance(
+    item: _InstanceWorkItem,
+) -> _InstanceWorkResult:
+    artifact = load_schema_artifact(item.schema_path)
+    runtime = artifact.runtime.restore_context().child("database-instance")
+    schema = artifact.compilation.schema
+    plan = InstancePlanner(item.planner_config).plan(
+        sample_id=artifact.sample_id,
+        schema=schema,
+        runtime=runtime,
+    )
+    plan_report = validate_instance_plan(schema, plan)
+    if not plan_report.is_valid:
+        raise ValueError(
+            f"invalid instance plan for {artifact.sample_id}: "
+            f"{[issue.code for issue in plan_report.issues]}"
+        )
+    database = DatabaseGenerator().generate(schema=schema, plan=plan)
+    report = validate_database_instance(schema, plan, database)
+    if not report.is_valid:
+        raise ValueError(
+            f"invalid database instance for {artifact.sample_id}: "
+            f"{[issue.code for issue in report.issues]}"
+        )
+    runtime_record = runtime.record(
+        project_version=item.project_version,
+        config_digest=item.config_digest,
+        metadata={
+            "stage": "database_instance",
+            "sample_id": artifact.sample_id,
+            "schema_id": schema.schema_id,
+        },
+    )
+    artifact_path = InstanceArtifactWriter(
+        output_root=item.output_root,
+        overwrite=item.overwrite,
+    ).commit(
+        sample_id=artifact.sample_id,
+        schema_artifact=str(item.schema_path),
+        runtime=runtime_record,
+        schema=schema,
+        plan=plan,
+        database=database,
+        report=report,
+    )
+    row_count = sum(table.row_count for table in database.tables)
+    return _InstanceWorkResult(
+        order=item.order,
+        sample_id=artifact.sample_id,
+        artifact_path=artifact_path,
+        manifest_entry={
+            "sample_id": artifact.sample_id,
+            "artifact": artifact_path.relative_to(item.output_root).as_posix(),
+            "schema_artifact": str(item.schema_path),
+            "schema_id": schema.schema_id,
+            "plan_id": plan.plan_id,
+            "table_count": len(database.tables),
+            "row_count": row_count,
+            "scm_counts": dict(
+                sorted(
+                    Counter(
+                        table.feature_family.value for table in plan.tables
+                    ).items()
+                )
+            ),
+        },
     )
 
 

@@ -51,7 +51,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         type=Path,
         default=None,
-        help="override paths.schema_output_root",
+        help="override the derived schema stage output directory",
     )
     schema.add_argument(
         "--count",
@@ -131,6 +131,13 @@ def _build_parser() -> argparse.ArgumentParser:
     instance.add_argument("--start-index", type=int, default=None)
     instance.add_argument("--shard-id", type=int, default=None)
     instance.add_argument("--num-shards", type=int, default=None)
+    instance.add_argument(
+        "--jobs",
+        dest="num_workers",
+        type=int,
+        default=None,
+        help="override instance_generation.num_workers",
+    )
     instance.add_argument("--progress-every", type=int, default=None)
     instance.add_argument(
         "--overwrite",
@@ -350,6 +357,7 @@ def _run_instance(args: argparse.Namespace) -> int:
             start_index=args.start_index,
             shard_id=args.shard_id,
             num_shards=args.num_shards,
+            num_workers=args.num_workers,
             progress_every=args.progress_every,
             overwrite=args.overwrite,
         ),
@@ -388,6 +396,7 @@ def _run_instance(args: argparse.Namespace) -> int:
         json.dumps(
             {
                 "generated_count": result.generated_count,
+                "num_workers": config.num_workers,
                 "output_root": str(result.output_root),
                 "manifest": str(result.manifest_path),
             },

@@ -1,25 +1,25 @@
-# SchemaBlueprint -> PhysicalSchema reference configuration.
-# Relative output paths are resolved from the 02_syn_data project directory.
+# Complete four-stage refactor-v2 pipeline configuration.
+# config_version is the file-format version supported by the current loader;
+# the preset/release name is carried by this filename and project_version.
 config_version: 1
 seed: 42
 
 paths:
-  # Stage outputs are derived as schema/, instance/, task/, and rdbpfn/.
-  output_root: outputs/v1_sample
+  # Derived directories: schema/, instance/, task/, rdbpfn/.
+  output_root: outputs/refactor_v2
 
+# Stage 01: SchemaBlueprint -> PhysicalSchema.
 generation:
-  # 01_schema.sh can override these run-level values with environment vars.
-  num_schemas: 20
+  num_schemas: 20000
   start_index: 0
   sample_id_prefix: sample
-  progress_every: 5
+  progress_every: 100
   overwrite: false
-  project_version: schema-pipeline-v1
+  project_version: schema-pipeline-v2
 
-# Stage-01 diagnostic graph artifacts. DOT is dependency-free; set
-# render_format to png, svg, or pdf when Graphviz `dot` is installed.
 schema_graph:
   write_dot: true
+  # null writes DOT only. Supported rendered formats: png, svg, pdf.
   render_format: null
   graphviz_command: dot
   include_columns: true
@@ -30,27 +30,19 @@ schema:
   min_tables: 3
   max_tables: 15
 
-  # Same table-count prior used by the legacy syn_data reference config.
-  # Delete both lists to use a uniform integer draw in [min_tables, max_tables].
+  # Remove both lists to sample table counts uniformly from min_tables to
+  # max_tables. Values and weights must have equal lengths.
   table_count_values: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
   table_count_weights: [0.20, 0.12, 0.16, 0.14, 0.12, 0.10, 0.06, 0.03, 0.02, 0.02, 0.015, 0.005, 0.01]
 
-  # All FK edges must satisfy parent.rank < child.rank.
   max_rank: 3
-
-  # Extra edges are sampled only from globally legal role/rank pairs.
   max_extra_edges: 2
   extra_edge_probability: 0.35
-
-  # Keep structural motifs local; remaining tables use legal role-aware
-  # background attachments so the entire schema is not task-shaped.
   min_motif_occurrences: 1
   max_motif_occurrences: 4
   background_attachment_probability: 0.35
 
 motifs:
-  # A positive weight enables a structural motif. Unknown names are rejected.
-  # Motif occurrences are persisted as generator-private provenance.
   weights:
     entity_event: 1.0
     entity_event_detail: 1.4
@@ -61,14 +53,11 @@ motifs:
 
 physical_design:
   schema_id_prefix: schema
-
-  # Fallback when no table-count rule or role override matches.
   min_feature_columns: 2
   max_feature_columns: 6
   feature_nullable_probability: 0.15
   primary_key_names: [id, pk_id, row_id]
 
-  # Legacy syn_data size-aware column prior. Ranges must not overlap.
   feature_columns_by_table_count:
     - table_count_min: 3
       table_count_max: 5
@@ -87,11 +76,12 @@ physical_design:
       min_columns: 2
       max_columns: 6
 
-  # Optional role overrides have precedence over table-count rules.
-  # Valid keys are exactly: entity, event, lookup, bridge, detail.
+  # Role overrides take precedence over the table-count rules. Valid keys are
+  # entity, event, lookup, bridge, and detail. Example value:
+  # entity: {min_columns: 4, max_columns: 10}
   feature_columns_by_role: {}
 
-# Stage 02: bind every physical schema to an executable instance plan.
+# Stage 02: PhysicalSchema -> role-conditioned database instance.
 instance:
   entity_rows_min: 128
   entity_rows_max: 512
@@ -107,7 +97,6 @@ instance:
   entity_child_factor_max: 1.5
   max_rows_per_table: 2048
 
-  # One shared latent registry drives both FK choice and feature SCMs.
   latent_dimension: 4
   optional_rate_min: 0.05
   optional_rate_max: 0.25
@@ -128,20 +117,18 @@ instance:
   time_scale_seconds_max: 86400.0
 
 instance_generation:
-  # null means consume all schema-manifest entries after start_index.
+  # null consumes every schema after start_index.
   count: null
   start_index: 0
   shard_id: 0
   num_shards: 1
-  # Process workers; one worker owns one database generation job.
-  num_workers: 1
-  progress_every: 5
+  num_workers: 8
+  progress_every: 100
   overwrite: false
-  project_version: instance-pipeline-v1
+  project_version: instance-pipeline-v2
 
-# Stage 03: derive supervised tasks without mutating the frozen database.
+# Stage 03: frozen database instance -> supervised relational tasks.
 task:
-  # Exact task count requested for every selected database.
   tasks_per_database: 2
   mechanism_weights:
     relation_attribute: 0.5
@@ -153,7 +140,6 @@ task:
   min_class_count_per_split: 2
   max_classification_categories: 12
 
-  # Future labels use events in (cutoff, cutoff + horizon].
   cutoff_quantile_min: 0.45
   cutoff_quantile_max: 0.70
   horizon_fraction_min: 0.12
@@ -162,40 +148,43 @@ task:
   require_full_task_count: true
 
 task_generation:
-  # null means consume all instance-manifest entries after start_index.
+  # null consumes every instance after start_index.
   database_count: null
   start_index: 0
   shard_id: 0
   num_shards: 1
-  progress_every: 5
+  progress_every: 100
   overwrite: false
-  project_version: task-pipeline-v1
+  project_version: task-pipeline-v2
 
+# Stage 04: task artifacts -> DBB datasets -> optional DFS/H5 prior.
 rdbpfn_export:
-  # One dbinfer_bench dataset is emitted per task to preserve its own view.
+  # null consumes every task after start_index.
   task_count: null
   start_index: 0
   shard_id: 0
   num_shards: 1
+
   validation_fraction: 0.20
   min_validation_rows: 8
   compress: true
-  progress_every: 5
+  progress_every: 100
   overwrite: false
-  project_version: rdbpfn-export-v1
-  # Build H5 from DFS-processed task features after DBB export.
+  project_version: rdbpfn-export-v2
+
+  # Set true to execute/package the H5 branch after DBB export.
   h5_enabled: false
-  # null writes rdbpfn_tasks.h5 under paths.output_root/rdbpfn.
+  # null writes <output_root>/rdbpfn/rdbpfn_tasks.h5.
   h5_output: null
   rdbpfn_preprocessing_root: ../RDBPFN/data_preprocessing
+  # false packages an existing <output_root>/rdbpfn-processed directory.
   h5_run_dfs: true
   dfs_depth: 1
-  # Number of DBB datasets processed concurrently by the RDBPFN DFS script.
-  dfs_jobs: 4
+  dfs_jobs: 8
   h5_total_rows: 600
   h5_max_columns: 60
   h5_seed: 42
 
-# Connectivity, FK DAG, no self-loop, no parallel FK, role legality,
-# Entity/Event presence, Bridge parent count and rank order are hard schema
-# invariants. They intentionally are not configurable switches.
+# Hard invariants are intentionally not switches: connectivity, FK DAG,
+# self-loop/parallel-FK prohibition, rank ordering, role-edge legality,
+# Entity/Event presence, Bridge parent count, and validation contracts.

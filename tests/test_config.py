@@ -17,10 +17,12 @@ if str(SRC_ROOT) not in sys.path:
 
 from rdb_prior.cli import main
 from rdb_prior.config import (
+    InstanceConfigOverrides,
     RDBPFNExportConfigOverrides,
     SchemaConfigError,
     SchemaConfigOverrides,
     TaskConfigOverrides,
+    load_instance_pipeline_config,
     load_schema_pipeline_config,
     load_rdbpfn_export_config,
     load_task_pipeline_config,
@@ -28,6 +30,37 @@ from rdb_prior.config import (
 
 
 class SchemaConfigTests(unittest.TestCase):
+    def test_refactor_v2_loads_complete_pipeline(self) -> None:
+        config_path = PROJECT_ROOT / "configs" / "refactor_v2.yaml"
+        schema = load_schema_pipeline_config(config_path)
+        instance = load_instance_pipeline_config(config_path)
+        task = load_task_pipeline_config(config_path)
+        export = load_rdbpfn_export_config(config_path)
+
+        run_root = (PROJECT_ROOT / "outputs" / "refactor_v2").resolve()
+        self.assertEqual(20000, schema.num_schemas)
+        self.assertEqual(run_root / "schema", schema.output_root)
+        self.assertEqual(8, instance.num_workers)
+        self.assertEqual(
+            run_root / "schema" / "manifest.json",
+            instance.schema_manifest,
+        )
+        self.assertEqual(run_root / "instance", instance.output_root)
+        self.assertEqual(2, task.planner.tasks_per_database)
+        self.assertEqual(
+            run_root / "instance" / "manifest.json",
+            task.instance_manifest,
+        )
+        self.assertEqual(run_root / "task", task.output_root)
+        self.assertEqual(
+            run_root / "task" / "manifest.json",
+            export.task_manifest,
+        )
+        self.assertEqual(run_root / "rdbpfn", export.output_root)
+        self.assertFalse(export.h5_enabled)
+        self.assertTrue(export.h5_run_dfs)
+        self.assertEqual(8, export.dfs_jobs)
+
     def test_reference_yaml_loads_all_schema_sections(self) -> None:
         config = load_schema_pipeline_config(
             PROJECT_ROOT / "configs" / "refactor_v1.yaml"
@@ -51,9 +84,34 @@ class SchemaConfigTests(unittest.TestCase):
         )
         self.assertEqual((), config.compiler.feature_columns_by_role)
         self.assertEqual(
-            (PROJECT_ROOT / "outputs" / "schema_v1_sample").resolve(),
+            (PROJECT_ROOT / "outputs" / "v1_sample" / "schema").resolve(),
             config.output_root,
         )
+        instance = load_instance_pipeline_config(
+            PROJECT_ROOT / "configs" / "refactor_v1.yaml"
+        )
+        task = load_task_pipeline_config(
+            PROJECT_ROOT / "configs" / "refactor_v1.yaml"
+        )
+        export = load_rdbpfn_export_config(
+            PROJECT_ROOT / "configs" / "refactor_v1.yaml"
+        )
+        run_root = (PROJECT_ROOT / "outputs" / "v1_sample").resolve()
+        self.assertEqual(
+            run_root / "schema" / "manifest.json",
+            instance.schema_manifest,
+        )
+        self.assertEqual(run_root / "instance", instance.output_root)
+        self.assertEqual(
+            run_root / "instance" / "manifest.json",
+            task.instance_manifest,
+        )
+        self.assertEqual(run_root / "task", task.output_root)
+        self.assertEqual(
+            run_root / "task" / "manifest.json",
+            export.task_manifest,
+        )
+        self.assertEqual(run_root / "rdbpfn", export.output_root)
 
     def test_unknown_option_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -80,7 +138,7 @@ class SchemaConfigTests(unittest.TestCase):
                     (
                         "config_version: 1",
                         "paths:",
-                        "  schema_output_root: outputs/v1/schema",
+                        "  output_root: outputs/v1",
                         "generation:",
                         "  num_schemas: 1",
                         "schema:",
@@ -186,6 +244,30 @@ class SchemaConfigTests(unittest.TestCase):
             self.assertTrue(
                 all(entry["table_count"] == 3 for entry in manifest["entries"])
             )
+
+    def test_instance_worker_config_and_cli_override(self) -> None:
+        config_path = PROJECT_ROOT / "configs" / "refactor_v1.yaml"
+        config = load_instance_pipeline_config(
+            config_path,
+            overrides=InstanceConfigOverrides(num_workers=3),
+        )
+        self.assertEqual(3, config.num_workers)
+
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            exit_code = main(
+                (
+                    "instance",
+                    "--config",
+                    str(config_path),
+                    "--jobs",
+                    "2",
+                    "--validate-config-only",
+                )
+            )
+        self.assertEqual(0, exit_code)
+        resolved = json.loads(stdout.getvalue())
+        self.assertEqual(2, resolved["num_workers"])
 
     def test_task_config_and_cli_override_tasks_per_database(self) -> None:
         config_path = PROJECT_ROOT / "configs" / "refactor_v1.yaml"

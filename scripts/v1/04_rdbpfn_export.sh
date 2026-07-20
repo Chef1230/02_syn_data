@@ -21,9 +21,13 @@ ARGS=(
 
 if [[ -n "${TASK_MANIFEST:-}" ]]; then
   ARGS+=(--task-manifest "${TASK_MANIFEST}")
+elif [[ -n "${OUTPUT_DIR:-}" ]]; then
+  ARGS+=(--task-manifest "${OUTPUT_DIR}/task/manifest.json")
 fi
-if [[ -n "${RDBPFN_OUTPUT_DIR:-${OUTPUT_DIR:-}}" ]]; then
-  ARGS+=(--output-dir "${RDBPFN_OUTPUT_DIR:-${OUTPUT_DIR}}")
+if [[ -n "${RDBPFN_OUTPUT_DIR:-}" ]]; then
+  ARGS+=(--output-dir "${RDBPFN_OUTPUT_DIR}")
+elif [[ -n "${OUTPUT_DIR:-}" ]]; then
+  ARGS+=(--output-dir "${OUTPUT_DIR}/rdbpfn")
 fi
 if [[ -n "${NUM_EXPORTS:-}" ]]; then
   ARGS+=(--count "${NUM_EXPORTS}")
