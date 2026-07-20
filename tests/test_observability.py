@@ -65,6 +65,27 @@ class ObservabilityTests(unittest.TestCase):
         self.assertIn("ETA", output)
         self.assertIn("tasks=2", output)
 
+    def test_progress_can_print_each_update_on_a_new_line(self) -> None:
+        stream = StringIO()
+        reporter = ProgressReporter(
+            stage="router-train",
+            total=2,
+            enabled=True,
+            overwrite=False,
+            width=12,
+            stream=stream,
+        )
+
+        reporter.update(1, 2, "task_1", detail="loss=1.2")
+        reporter.update(2, 2, "task_2", detail="loss=1.1")
+        reporter.close()
+
+        output = stream.getvalue()
+        self.assertNotIn("\r", output)
+        self.assertEqual(2, len(output.splitlines()))
+        self.assertIn("task_1 | loss=1.2", output)
+        self.assertIn("task_2 | loss=1.1", output)
+
     def test_pipeline_reports_every_completed_item(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             events: list[tuple[int, int, str]] = []

@@ -648,6 +648,7 @@ def _run_router_train(args: argparse.Namespace) -> int:
         logger=logger,
         log_every=config.progress_every,
         enabled=args.progress,
+        overwrite=False,
         width=args.progress_width,
     )
     try:

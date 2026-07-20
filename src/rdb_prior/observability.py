@@ -83,6 +83,7 @@ class ProgressReporter:
         logger: logging.Logger | None = None,
         log_every: int = 100,
         enabled: bool | None = None,
+        overwrite: bool = True,
         width: int = 28,
         stream: TextIO | None = None,
     ) -> None:
@@ -102,6 +103,7 @@ class ProgressReporter:
         self.enabled = (
             bool(self.stream.isatty()) if enabled is None else enabled
         )
+        self.overwrite = overwrite
         self.width = width
         self.started_at = time.monotonic()
         self.completed = 0
@@ -172,11 +174,14 @@ class ProgressReporter:
             f"{rate:6.2f}/s ETA {_duration(eta)} | {item_id}{suffix}"
         )
         self._last_line = line
-        self.stream.write("\r" + line)
-        if self.completed == total:
+        if self.overwrite:
+            self.stream.write("\r" + line)
+        else:
+            self.stream.write(line + "\n")
+        if self.overwrite and self.completed == total:
             self.stream.write("\n")
         self.stream.flush()
-        self._rendered = self.completed != total
+        self._rendered = self.overwrite and self.completed != total
 
     def _clear_line(self) -> None:
         self.stream.write("\r" + " " * len(self._last_line) + "\r")
