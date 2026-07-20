@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-CONFIG_PATH="${CONFIG_PATH:-${RDB_PRIOR_CONFIG:-${PROJECT_ROOT}/configs/refactor_v1.yaml}}"
+CONFIG_PATH="${CONFIG_PATH:-${RDB_PRIOR_CONFIG:-${PROJECT_ROOT}/configs/refactor_v2.yaml}}"
 BASH_BIN="${BASH_BIN:-bash}"
 
 if [[ $# -gt 0 && "${1}" != -* ]]; then
@@ -11,7 +11,7 @@ if [[ $# -gt 0 && "${1}" != -* ]]; then
   shift
 fi
 if [[ $# -gt 0 ]]; then
-  echo "generate_v1.sh accepts only an optional config path" >&2
+  echo "generate_v2.sh accepts only an optional config path" >&2
   exit 2
 fi
 
@@ -29,4 +29,4 @@ fi
 "${BASH_BIN}" "${SCRIPT_DIR}/02_instance.sh" "${CONFIG_PATH}"
 "${BASH_BIN}" "${SCRIPT_DIR}/03_task.sh" "${CONFIG_PATH}"
 "${BASH_BIN}" "${SCRIPT_DIR}/04b_router_train.sh" "${CONFIG_PATH}"
-"${BASH_BIN}" "${SCRIPT_DIR}/04b_routed_h5.sh" "${CONFIG_PATH}"
+"${BASH_BIN}" "${SCRIPT_DIR}/05_routed_h5.sh" "${CONFIG_PATH}"

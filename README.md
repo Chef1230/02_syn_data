@@ -413,6 +413,15 @@ bash scripts/v1/04b_router_train.sh configs/refactor_v2.yaml
 bash scripts/v1/05_routed_h5.sh configs/refactor_v2.yaml
 ```
 
+For a fresh output directory, the complete schema-to-routed-H5 sequence is:
+
+```bash
+bash scripts/v1/generate_v2.sh configs/refactor_v2.yaml
+```
+
+This route-native sequence does not invoke `04_rdbpfn_export.sh`; that script
+is retained for the legacy RDBPFN/DFS export path.
+
 Checkpoints are written below `OUTPUT_DIR/router/checkpoints/`. The H5 file at
 `OUTPUT_DIR/routed/routed_tasks.h5` stores per-task target tokens, selected
 relation-column tokens and masks, support/query mask, labels, route/column
