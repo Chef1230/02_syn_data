@@ -222,6 +222,7 @@ class SparseRouterTests(unittest.TestCase):
             with self.assertLogs(
                 "rdb_prior.routing.trainer", level="INFO"
             ) as captured:
+                progress_updates = []
                 result = train_sparse_router(
                     RouterTrainingConfig(
                         task_manifest=root / "task" / "manifest.json",
@@ -233,8 +234,15 @@ class SparseRouterTests(unittest.TestCase):
                         batch_size=2,
                         num_workers=2,
                         prefetch_factor=2,
-                    )
+                    ),
+                    progress=lambda completed, total, task_id, detail: (
+                        progress_updates.append(
+                            (completed, total, task_id, detail)
+                        )
+                    ),
                 )
+            self.assertIn("loss=", progress_updates[-1][3])
+            self.assertIn("running_loss=", progress_updates[-1][3])
             self.assertTrue(
                 any(
                     "router eval epoch=1 batch=1/1" in message

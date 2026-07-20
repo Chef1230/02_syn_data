@@ -46,7 +46,7 @@ class RouterTrainingResult:
 def train_sparse_router(
     config: RouterTrainingConfig,
     *,
-    progress: Callable[[int, int, str], None] | None = None,
+    progress: Callable[[int, int, str, str | None], None] | None = None,
 ) -> RouterTrainingResult:
     _set_seed(config.seed)
     device = resolve_device(config.device)
@@ -118,8 +118,8 @@ def train_sparse_router(
             progress=(
                 None
                 if progress is None
-                else lambda done, _total, task_id: progress(
-                    completed_steps + done, total_steps, task_id
+                else lambda done, _total, task_id, detail: progress(
+                    completed_steps + done, total_steps, task_id, detail
                 )
             ),
         )
@@ -224,7 +224,7 @@ def _run_epoch(
     scaler: object | None,
     precision: str,
     evaluation_epoch: int | None,
-    progress: Callable[[int, int, str], None] | None,
+    progress: Callable[[int, int, str, str | None], None] | None,
 ) -> dict[str, float]:
     totals = {
         "loss": 0.0,
@@ -338,7 +338,15 @@ def _run_epoch(
                     totals["loss"] / completed,
                 )
             if progress is not None:
-                progress(completed, len(tasks), batch.task_ids[-1])
+                progress(
+                    completed,
+                    len(tasks),
+                    batch.task_ids[-1],
+                    (
+                        f"loss={batch_metrics['loss']:.6f} "
+                        f"running_loss={totals['loss'] / completed:.6f}"
+                    ),
+                )
     finally:
         if materialize_pool is not None:
             materialize_pool.shutdown(wait=True)

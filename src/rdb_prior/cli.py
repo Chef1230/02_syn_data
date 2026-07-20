@@ -653,8 +653,8 @@ def _run_router_train(args: argparse.Namespace) -> int:
     try:
         result = train_sparse_router(
             config,
-            progress=lambda completed, total, task_id: reporter.update(
-                completed, total, task_id
+            progress=lambda completed, total, task_id, detail: reporter.update(
+                completed, total, task_id, detail=detail
             ),
         )
     except Exception:
