@@ -219,17 +219,28 @@ class SparseRouterTests(unittest.TestCase):
                 transformer_layers=1,
                 dropout=0.0,
             )
-            result = train_sparse_router(
-                RouterTrainingConfig(
-                    task_manifest=root / "task" / "manifest.json",
-                    output_root=root / "router",
-                    model=model_config,
-                    epochs=1,
-                    validation_fraction=0.0,
-                    device="cpu",
-                    batch_size=2,
-                    num_workers=2,
-                    prefetch_factor=2,
+            with self.assertLogs(
+                "rdb_prior.routing.trainer", level="INFO"
+            ) as captured:
+                result = train_sparse_router(
+                    RouterTrainingConfig(
+                        task_manifest=root / "task" / "manifest.json",
+                        output_root=root / "router",
+                        model=model_config,
+                        epochs=1,
+                        validation_fraction=0.0,
+                        device="cpu",
+                        batch_size=2,
+                        num_workers=2,
+                        prefetch_factor=2,
+                    )
+                )
+            self.assertTrue(
+                any(
+                    "router eval epoch=1 batch=1/1" in message
+                    and "loss=" in message
+                    and "running_loss=" in message
+                    for message in captured.output
                 )
             )
             self.assertTrue(result.best_checkpoint.is_file())

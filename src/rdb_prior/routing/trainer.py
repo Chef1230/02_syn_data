@@ -114,6 +114,7 @@ def train_sparse_router(
             optimizer=optimizer,
             scaler=scaler,
             precision=precision,
+            evaluation_epoch=None,
             progress=(
                 None
                 if progress is None
@@ -135,6 +136,7 @@ def train_sparse_router(
                 optimizer=None,
                 scaler=None,
                 precision=precision,
+                evaluation_epoch=epoch,
                 progress=None,
             )
         validation_loss = validation_metrics["loss"]
@@ -221,6 +223,7 @@ def _run_epoch(
     optimizer: torch.optim.Optimizer | None,
     scaler: object | None,
     precision: str,
+    evaluation_epoch: int | None,
     progress: Callable[[int, int, str], None] | None,
 ) -> dict[str, float]:
     totals = {
@@ -248,6 +251,8 @@ def _run_epoch(
         else None
     )
     completed = 0
+    batch_index = 0
+    total_batches = (len(tasks) + config.batch_size - 1) // config.batch_size
     try:
         prepared = _iter_prepared_batches(
             tasks,
@@ -258,6 +263,7 @@ def _run_epoch(
             prefetch_factor=config.prefetch_factor,
         )
         for raw_tasks, descriptors in prepared:
+            batch_index += 1
             current_size = len(raw_tasks)
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
@@ -315,9 +321,22 @@ def _run_epoch(
                         model.parameters(), config.gradient_clip
                     )
                     optimizer.step()
-            for name, value in losses.detached_metrics().items():
+            batch_metrics = losses.detached_metrics()
+            for name, value in batch_metrics.items():
                 totals[name] += value * current_size
             completed += current_size
+            if evaluation_epoch is not None:
+                _LOGGER.info(
+                    "router eval epoch=%d batch=%d/%d tasks=%d/%d "
+                    "loss=%.6f running_loss=%.6f",
+                    evaluation_epoch,
+                    batch_index,
+                    total_batches,
+                    completed,
+                    len(tasks),
+                    batch_metrics["loss"],
+                    totals["loss"] / completed,
+                )
             if progress is not None:
                 progress(completed, len(tasks), batch.task_ids[-1])
     finally:
