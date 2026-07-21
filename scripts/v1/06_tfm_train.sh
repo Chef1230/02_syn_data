@@ -20,6 +20,7 @@ TFM_CONFIG_NAME="${TFM_CONFIG_NAME:-RDBPFN_routed}"
 ROUTED_H5_PATH="${ROUTED_H5_OUTPUT:-${PROJECT_ROOT}/outputs/refactor_v2/routed/routed_tasks.h5}"
 NUM_PROCESSES="${NUM_PROCESSES:-1}"
 TFM_SAVE_EVERY_EVALS="${TFM_SAVE_EVERY_EVALS:-8}"
+TFM_FIND_UNUSED_PARAMETERS="${TFM_FIND_UNUSED_PARAMETERS:-true}"
 
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "Synthetic-data config does not exist: ${CONFIG_PATH}" >&2
@@ -44,7 +45,11 @@ if ! [[ "${NUM_PROCESSES}" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 
-LAUNCH_ARGS=(--num_processes "${NUM_PROCESSES}")
+LAUNCH_ARGS=(
+  --num_processes "${NUM_PROCESSES}"
+  --num_machines 1
+  --dynamo_backend no
+)
 if (( NUM_PROCESSES > 1 )); then
   LAUNCH_ARGS+=(--multi_gpu)
 fi
@@ -57,6 +62,12 @@ TRAIN_ARGS=(
   "train.num_gpus=${NUM_PROCESSES}"
   "train.batch_size=1"
   "++train.save_every_evals=${TFM_SAVE_EVERY_EVALS}"
+  "++train.find_unused_parameters=${TFM_FIND_UNUSED_PARAMETERS}"
+  "++model.per_column_embeddings=false"
+  "++model.sort_category_embeddings=false"
+  "++model.invariant_noise_encoder=false"
+  "++model.dual_feature_attention=false"
+  "++model.category_as_numeric=false"
 )
 [[ -n "${TFM_NUM_STEPS:-}" ]] && TRAIN_ARGS+=("train.num_steps=${TFM_NUM_STEPS}")
 [[ -n "${TFM_NUM_EPOCHS:-}" ]] && TRAIN_ARGS+=("train.num_epochs=${TFM_NUM_EPOCHS}")
@@ -70,6 +81,7 @@ echo "Routed H5:       ${ROUTED_H5_PATH}"
 echo "TFM root:        ${MODEL_ROOT}"
 echo "Processes:       ${NUM_PROCESSES} (batch_size=1 per process)"
 echo "Save cadence:    every ${TFM_SAVE_EVERY_EVALS} evals"
+echo "DDP unused params: ${TFM_FIND_UNUSED_PARAMETERS}"
 
 cd "${MODEL_ROOT}"
 export PYTHONPATH="${MODEL_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"

@@ -442,7 +442,7 @@ is retained for the legacy RDBPFN/DFS export path.
 `06_tfm_train.sh` launches `RDBPFN_routed` with one task per device. Its main
 overrides are `RDBPFN_ROOT`, `ROUTED_H5_OUTPUT`, `NUM_PROCESSES`,
 `MIXED_PRECISION`, `TFM_NUM_STEPS`, `TFM_NUM_EPOCHS`, `TFM_LR`,
-`TFM_SAVE_EVERY_EVALS`,
+`TFM_SAVE_EVERY_EVALS`, `TFM_FIND_UNUSED_PARAMETERS`,
 `TFM_LOAD_CHECKPOINT`, and `TFM_SAVE_CHECKPOINT`. Additional arguments are
 forwarded as Hydra overrides.
 
