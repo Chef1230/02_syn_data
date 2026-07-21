@@ -12,7 +12,7 @@ import torch
 
 from rdb_prior.routing.checkpoint import load_router_checkpoint
 from rdb_prior.routing.config import RoutedH5Config
-from rdb_prior.routing.data import RoutingTaskTensorizer, load_routing_tasks
+from rdb_prior.routing.data import RoutingTaskStore, RoutingTaskTensorizer
 from rdb_prior.routing.trainer import resolve_device
 
 
@@ -35,11 +35,12 @@ def export_routed_h5(
     model, checkpoint = load_router_checkpoint(config.checkpoint, device=device)
     model.eval()
     tensorizer = RoutingTaskTensorizer(model.config)
-    tasks = load_routing_tasks(
+    store = RoutingTaskStore(
         config.task_manifest,
         start_index=config.start_index,
         task_count=config.task_count,
     )
+    references = store.references
     h5py = _require_h5py()
     config.output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = config.output_path.with_suffix(config.output_path.suffix + ".tmp")
@@ -56,7 +57,8 @@ def export_routed_h5(
             )
             handle.attrs["checkpoint_epoch"] = int(checkpoint["epoch"])
             task_group = handle.create_group("tasks")
-            for completed, raw in enumerate(tasks, start=1):
+            for completed, reference in enumerate(references, start=1):
+                raw = store.load(reference)
                 descriptors = tensorizer.tensorize_descriptors(raw).to(device)
                 selection = model.select(descriptors)
                 batch = tensorizer.materialize_selected(
@@ -71,6 +73,8 @@ def export_routed_h5(
                 group.attrs["num_classes"] = batch.num_classes
                 group.attrs["label_center"] = batch.label_center
                 group.attrs["label_scale"] = batch.label_scale
+                group.attrs["class_values"] = json.dumps(batch.class_values)
+                _dataset(group, "row_ids", batch.row_ids)
                 _dataset(group, "target_tokens", output.target_tokens)
                 _dataset(group, "relation_tokens", output.relation_tokens)
                 _dataset(group, "relation_token_mask", output.relation_mask)
@@ -121,13 +125,16 @@ def export_routed_h5(
                     batch.source_column_ids
                 )
                 if progress is not None:
-                    progress(completed, len(tasks), batch.task_id)
+                    progress(completed, len(references), batch.task_id)
         temporary.replace(config.output_path)
     except Exception:
         if temporary.exists():
             temporary.unlink()
         raise
-    return RoutedH5Result(output_path=config.output_path, task_count=len(tasks))
+    return RoutedH5Result(
+        output_path=config.output_path,
+        task_count=len(references),
+    )
 
 
 def _dataset(group: object, name: str, tensor: torch.Tensor) -> None:

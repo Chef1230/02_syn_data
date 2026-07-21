@@ -55,7 +55,9 @@ def build_task_view(
     }
     for rule in plan.observation_rules:
         values = database.table(rule.table_id).column(rule.time_column_id)
-        masks[rule.table_id] &= values <= rule.max_timestamp
+        masks[rule.table_id] &= (values >= 0) & (
+            values <= rule.max_timestamp
+        )
 
     changed = True
     while changed:

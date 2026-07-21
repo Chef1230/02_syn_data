@@ -104,6 +104,7 @@ class TaskPlan:
     time_column_id: str | None = None
     cutoff_time: int | None = None
     horizon_end_time: int | None = None
+    row_cutoff_time_column_id: str | None = None
     masked_column_ids: tuple[str, ...] = ()
     observation_rules: tuple[ObservationRule, ...] = ()
     route_supervision: tuple[RoutePathLabel, ...] = ()
@@ -128,7 +129,12 @@ class TaskPlan:
             raise TypeError("seed must be an integer")
         if self.seed < 0:
             raise ValueError("seed must be non-negative")
-        for name in ("target_column_id", "foreign_key_id", "time_column_id"):
+        for name in (
+            "target_column_id",
+            "foreign_key_id",
+            "time_column_id",
+            "row_cutoff_time_column_id",
+        ):
             value = getattr(self, name)
             if value is not None:
                 _identifier(name, value)
@@ -154,6 +160,19 @@ class TaskPlan:
             isinstance(rule, ObservationRule) for rule in self.observation_rules
         ):
             raise TypeError("observation_rules must contain ObservationRule")
+        observation_keys = tuple(
+            (rule.table_id, rule.time_column_id)
+            for rule in self.observation_rules
+        )
+        if len(set(observation_keys)) != len(observation_keys):
+            raise ValueError("observation_rules must be unique by table/column")
+        if (
+            self.row_cutoff_time_column_id is not None
+            and not self.observation_rules
+        ):
+            raise ValueError(
+                "row-specific cutoff requires at least one observation rule"
+            )
         if not isinstance(self.route_supervision, tuple) or not all(
             isinstance(label, RoutePathLabel)
             for label in self.route_supervision
@@ -181,6 +200,7 @@ class TaskPlan:
             self.foreign_key_id,
             self.cutoff_time,
             self.horizon_end_time,
+            self.row_cutoff_time_column_id,
         )
 
     def _validate_mechanism_contract(self) -> None:
@@ -226,6 +246,7 @@ class TaskPlan:
             "time_column_id": self.time_column_id,
             "cutoff_time": self.cutoff_time,
             "horizon_end_time": self.horizon_end_time,
+            "row_cutoff_time_column_id": self.row_cutoff_time_column_id,
             "split_strategy": self.split_strategy,
             "seed": self.seed,
             "masked_column_ids": list(self.masked_column_ids),
@@ -254,6 +275,9 @@ class TaskPlan:
             time_column_id=data.get("time_column_id"),
             cutoff_time=data.get("cutoff_time"),
             horizon_end_time=data.get("horizon_end_time"),
+            row_cutoff_time_column_id=data.get(
+                "row_cutoff_time_column_id"
+            ),
             split_strategy=data["split_strategy"],
             seed=data["seed"],
             masked_column_ids=tuple(data.get("masked_column_ids", ())),

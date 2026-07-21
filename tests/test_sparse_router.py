@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 
-import numpy as np
+import h5py
 import torch
 
 
@@ -29,7 +29,12 @@ from rdb_prior.pipeline import (
     generate_physical_schemas,
 )
 from rdb_prior.routing.catalog import enumerate_schema_paths
-from rdb_prior.routing.config import RouterModelConfig, RouterTrainingConfig
+from rdb_prior.routing.config import (
+    RoutedH5Config,
+    RouterEvaluationConfig,
+    RouterModelConfig,
+    RouterTrainingConfig,
+)
 from rdb_prior.routing.data import (
     RoutingTaskTensorizer,
     collate_routed_tasks,
@@ -39,6 +44,8 @@ from rdb_prior.routing.losses import sparse_router_batch_loss, sparse_router_los
 from rdb_prior.routing.checkpoint import load_router_checkpoint
 from rdb_prior.routing.network import SparseRelationalPFN
 from rdb_prior.routing.trainer import train_sparse_router
+from rdb_prior.evaluation.router import evaluate_router_checkpoint
+from rdb_prior.export.routed_h5 import export_routed_h5
 from rdb_prior.schema.sampler import BlueprintSamplerConfig
 from rdb_prior.task.model import RouteRole, TaskMechanism
 from rdb_prior.task.pipeline import TaskPipelineConfig, generate_tasks
@@ -252,6 +259,43 @@ class SparseRouterTests(unittest.TestCase):
                 )
             )
             self.assertTrue(result.best_checkpoint.is_file())
+            evaluation = evaluate_router_checkpoint(
+                RouterEvaluationConfig(
+                    task_manifest=manifest_path,
+                    checkpoint=result.best_checkpoint,
+                    output_root=root / "evaluation",
+                    device="cpu",
+                )
+            )
+            self.assertEqual(2, evaluation.task_count)
+            self.assertGreater(evaluation.query_row_count, 0)
+            evaluation_payload = json.loads(
+                evaluation.metrics_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                "rdb-prior-router-benchmark-eval-v1",
+                evaluation_payload["format"],
+            )
+            predictions = evaluation.predictions_path.read_text(
+                encoding="utf-8"
+            ).splitlines()
+            self.assertEqual(evaluation.query_row_count, len(predictions))
+            self.assertIn("row_id", json.loads(predictions[0]))
+
+            routed_path = root / "routed" / "benchmark.h5"
+            export_routed_h5(
+                RoutedH5Config(
+                    task_manifest=manifest_path,
+                    checkpoint=result.best_checkpoint,
+                    output_path=routed_path,
+                    task_count=1,
+                    device="cpu",
+                )
+            )
+            with h5py.File(routed_path, "r") as handle:
+                group = next(iter(handle["tasks"].values()))
+                self.assertIn("row_ids", group)
+                self.assertIn("class_values", group.attrs)
             loaded, payload = load_router_checkpoint(result.best_checkpoint)
             self.assertEqual(1, payload["epoch"])
             batch = RoutingTaskTensorizer(model_config).tensorize(raw)

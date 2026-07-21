@@ -452,6 +452,107 @@ scores, selected indices, observable path descriptors and measured costs.
 Because token widths vary by task, each task is an H5 group rather than one
 globally padded DFS matrix.
 
+### Real benchmark router evaluation
+
+Real benchmark data must first be represented by the same leakage-safe task
+artifact contract as synthetic data: a task manifest whose entries reference a
+schema artifact, database-instance artifact and task artifact. Benchmark
+train/validation rows are support rows and benchmark test rows are query rows.
+The router sees support labels only.
+
+RelBench entity tasks can be converted and evaluated through one shell entry.
+Install the optional dependency once with `pip install -e '.[relbench,router]'`,
+then run:
+
+```bash
+CUDA_VISIBLE_DEVICES=5 \
+RELBENCH_DATASET=rel-amazon \
+RELBENCH_TASK=user-churn \
+MAX_ROWS_PER_TASK=600 QUERY_ROWS_PER_TASK=256 \
+OVERWRITE=1 \
+bash scripts/eval/relbench.sh convert
+```
+
+The generated router manifest is
+`outputs/relbench/rel-amazon/user-churn/task/manifest.json`. The importer maps
+all PK/FK values to contiguous row indices and creates a prediction-anchor row
+for every RelBench train/validation/test example. Test rows are chunked so no
+row is silently removed by the model's per-task row limit. Historical event
+tables are filtered using each anchor row's prediction timestamp, rather than
+one dataset-wide cutoff. `relbench_metadata.json` preserves original table and
+column mappings, split sizes, query chunk ranges, and the exact mapping from
+prediction `row_id` back to RelBench test order.
+
+The importer currently supports scalar EntityTask targets: binary
+classification, multiclass classification, and regression. Multilabel and
+link/recommendation tasks are rejected because the current router task contract
+does not represent their target shapes.
+
+Use the same entry for the rest of the benchmark pipeline:
+
+```bash
+CUDA_VISIBLE_DEVICES=5 \
+RELBENCH_DATASET=rel-amazon RELBENCH_TASK=user-churn \
+ROUTER_CHECKPOINT=/absolute/path/to/router/checkpoints/best.pt \
+DEVICE=cuda MIXED_PRECISION=bf16 OVERWRITE=1 \
+bash scripts/eval/relbench.sh eval
+
+# Export routed relation tokens for the downstream TFM stage.
+CUDA_VISIBLE_DEVICES=5 \
+RELBENCH_DATASET=rel-amazon RELBENCH_TASK=user-churn \
+ROUTER_CHECKPOINT=/absolute/path/to/router/checkpoints/best.pt \
+DEVICE=cuda OVERWRITE=1 \
+bash scripts/eval/relbench.sh h5
+```
+
+`bash scripts/eval/relbench.sh all` runs convert, router eval, and H5 export in
+sequence. A complete `eval` also restores the original RelBench test order and
+writes official `task.evaluate()` results to
+`router_eval/relbench_metrics.json`; bounded `NUM_TASKS`/`START_INDEX` runs skip
+that official score because their prediction set is incomplete. Set
+`SUPPORT_ROWS`, `MAX_CLASSES`, `RELBENCH_OUTPUT`,
+`ROUTER_EVAL_OUTPUT`, `ROUTED_H5_OUTPUT`, `NUM_TASKS`, or `START_INDEX` through
+environment variables when needed. For a cached/offline RelBench dataset, set
+`DOWNLOAD=0`.
+
+Evaluate a trained checkpoint directly on those query rows:
+
+```bash
+CUDA_VISIBLE_DEVICES=5 \
+BENCHMARK_TASK_MANIFEST=/absolute/path/to/benchmark/tasks/manifest.json \
+ROUTER_CHECKPOINT=/absolute/path/to/router/checkpoints/best.pt \
+ROUTER_EVAL_OUTPUT=outputs/benchmark/router_eval \
+DEVICE=cuda MIXED_PRECISION=bf16 OVERWRITE=1 \
+bash scripts/v1/04c_router_eval.sh
+```
+
+Use `NUM_TASKS` and `START_INDEX` for a bounded smoke test or shard. The output
+directory contains:
+
+```text
+metrics.json       # per-task and aggregate classification/regression metrics
+predictions.jsonl  # one query prediction per line with task_id and row_id
+```
+
+Classification metrics are accuracy, balanced accuracy, log loss and macro
+one-vs-rest ROC-AUC when defined. Regression metrics are MAE, RMSE and R2.
+Predictions include encoded and original classification values. To create the
+routed-token H5 for a later consumer, use the same manifest and checkpoint:
+
+```bash
+CUDA_VISIBLE_DEVICES=5 \
+TASK_MANIFEST=/absolute/path/to/benchmark/tasks/manifest.json \
+ROUTER_CHECKPOINT=/absolute/path/to/router/checkpoints/best.pt \
+ROUTED_H5_OUTPUT=outputs/benchmark/routed/benchmark.h5 \
+DEVICE=cuda OVERWRITE=1 \
+bash scripts/v1/05_routed_h5.sh configs/refactor_v2.yaml --progress
+```
+
+Routed H5 task groups include target-table `row_ids` and the JSON-encoded
+`class_values` attribute so downstream benchmark predictions can be mapped
+back to source rows and original class labels. Export loads task artifacts
+lazily, keeping memory bounded for large benchmarks.
+
 Run RDBPFN depth-1 DFS on every exported task dataset from the RDBPFN
 `data_preprocessing` directory:
 

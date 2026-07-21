@@ -281,6 +281,68 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     routed_h5.add_argument("--validate-config-only", action="store_true")
     _add_observability_arguments(routed_h5)
+
+    router_eval = subparsers.add_parser(
+        "router-eval",
+        help="evaluate a router checkpoint on real or synthetic task artifacts",
+    )
+    router_eval.add_argument("--task-manifest", type=Path, required=True)
+    router_eval.add_argument("--checkpoint", type=Path, required=True)
+    router_eval.add_argument("--output-dir", type=Path, required=True)
+    router_eval.add_argument("--count", dest="task_count", type=int, default=None)
+    router_eval.add_argument("--start-index", type=int, default=0)
+    router_eval.add_argument("--device", default="auto")
+    router_eval.add_argument(
+        "--mixed-precision",
+        choices=("none", "fp16", "bf16"),
+        default="none",
+    )
+    router_eval.add_argument("--artifact-cache-size", type=int, default=16)
+    router_eval.add_argument(
+        "--overwrite", action=argparse.BooleanOptionalAction, default=False
+    )
+    _add_observability_arguments(router_eval)
+
+    relbench_import = subparsers.add_parser(
+        "relbench-import",
+        help="convert a RelBench EntityTask into native benchmark artifacts",
+    )
+    relbench_import.add_argument("--dataset", required=True)
+    relbench_import.add_argument("--task", required=True)
+    relbench_import.add_argument("--output-dir", type=Path, required=True)
+    relbench_import.add_argument(
+        "--download",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="download/verify the registered RelBench dataset and task cache",
+    )
+    relbench_import.add_argument("--seed", type=int, default=0)
+    relbench_import.add_argument("--max-rows-per-task", type=int, default=600)
+    relbench_import.add_argument(
+        "--query-rows-per-task", type=int, default=256
+    )
+    relbench_import.add_argument("--support-rows", type=int, default=None)
+    relbench_import.add_argument("--max-classes", type=int, default=16)
+    relbench_import.add_argument("--max-text-length", type=int, default=256)
+    relbench_import.add_argument(
+        "--overwrite", action=argparse.BooleanOptionalAction, default=False
+    )
+    _add_observability_arguments(relbench_import)
+
+    relbench_score = subparsers.add_parser(
+        "relbench-score",
+        help="score complete router predictions with official RelBench metrics",
+    )
+    relbench_score.add_argument("--metadata", type=Path, required=True)
+    relbench_score.add_argument("--predictions", type=Path, required=True)
+    relbench_score.add_argument("--output", type=Path, required=True)
+    relbench_score.add_argument(
+        "--download", action=argparse.BooleanOptionalAction, default=False
+    )
+    relbench_score.add_argument(
+        "--overwrite", action=argparse.BooleanOptionalAction, default=False
+    )
+    _add_observability_arguments(relbench_score)
     return parser
 
 
@@ -733,6 +795,157 @@ def _run_routed_h5(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_router_eval(args: argparse.Namespace) -> int:
+    logger = configure_logging(
+        level=args.log_level, log_file=args.log_file
+    ).getChild("router-eval")
+    from rdb_prior.evaluation.router import evaluate_router_checkpoint
+    from rdb_prior.routing.config import RouterEvaluationConfig
+
+    config = RouterEvaluationConfig(
+        task_manifest=args.task_manifest.resolve(),
+        checkpoint=args.checkpoint.resolve(),
+        output_root=args.output_dir.resolve(),
+        task_count=args.task_count,
+        start_index=args.start_index,
+        device=args.device,
+        mixed_precision=args.mixed_precision,
+        artifact_cache_size=args.artifact_cache_size,
+        overwrite=args.overwrite,
+    )
+    reporter = ProgressReporter(
+        stage="router-eval",
+        logger=logger,
+        log_every=1,
+        enabled=args.progress,
+        overwrite=False,
+        width=args.progress_width,
+    )
+    try:
+        result = evaluate_router_checkpoint(
+            config,
+            progress=lambda completed, total, task_id: reporter.update(
+                completed, total, task_id
+            ),
+        )
+    except Exception:
+        logger.exception("router benchmark evaluation failed")
+        raise
+    finally:
+        reporter.close()
+        close_logging()
+    print(
+        json.dumps(
+            {
+                "metrics": str(result.metrics_path),
+                "predictions": str(result.predictions_path),
+                "task_count": result.task_count,
+                "query_row_count": result.query_row_count,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _run_relbench_import(args: argparse.Namespace) -> int:
+    logger = configure_logging(
+        level=args.log_level, log_file=args.log_file
+    ).getChild("relbench-import")
+    from rdb_prior.importers.relbench import (
+        RelBenchImportConfig,
+        import_relbench,
+    )
+
+    config = RelBenchImportConfig(
+        dataset_name=args.dataset,
+        task_name=args.task,
+        output_root=args.output_dir.resolve(),
+        download=args.download,
+        overwrite=args.overwrite,
+        seed=args.seed,
+        max_rows_per_task=args.max_rows_per_task,
+        query_rows_per_task=args.query_rows_per_task,
+        support_rows=args.support_rows,
+        max_classes=args.max_classes,
+        max_text_length=args.max_text_length,
+    )
+    reporter = ProgressReporter(
+        stage="relbench-import",
+        logger=logger,
+        log_every=1,
+        enabled=args.progress,
+        overwrite=False,
+        width=args.progress_width,
+    )
+    try:
+        result = import_relbench(
+            config,
+            progress=lambda completed, total, task_id: reporter.update(
+                completed, total, task_id
+            ),
+        )
+    except Exception:
+        logger.exception("RelBench import failed")
+        raise
+    finally:
+        reporter.close()
+        close_logging()
+    print(
+        json.dumps(
+            {
+                "task_manifest": str(result.task_manifest),
+                "metadata": str(result.metadata_path),
+                "task_count": result.task_count,
+                "support_row_count": result.support_row_count,
+                "query_row_count": result.query_row_count,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _run_relbench_score(args: argparse.Namespace) -> int:
+    logger = configure_logging(
+        level=args.log_level, log_file=args.log_file
+    ).getChild("relbench-score")
+    from rdb_prior.evaluation.relbench import (
+        RelBenchScoreConfig,
+        score_relbench_predictions,
+    )
+
+    try:
+        result = score_relbench_predictions(
+            RelBenchScoreConfig(
+                metadata_path=args.metadata.resolve(),
+                predictions_path=args.predictions.resolve(),
+                output_path=args.output.resolve(),
+                download=args.download,
+                overwrite=args.overwrite,
+            )
+        )
+    except Exception:
+        logger.exception("official RelBench scoring failed")
+        raise
+    finally:
+        close_logging()
+    print(
+        json.dumps(
+            {
+                "output": str(result.output_path),
+                "prediction_count": result.prediction_count,
+                "metrics": dict(result.metrics),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -766,6 +979,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_routed_h5(args)
         except SchemaConfigError as error:
             parser.error(str(error))
+    if args.command == "router-eval":
+        return _run_router_eval(args)
+    if args.command == "relbench-import":
+        return _run_relbench_import(args)
+    if args.command == "relbench-score":
+        return _run_relbench_score(args)
     parser.error(f"Unknown command: {args.command}")
     return 2
 

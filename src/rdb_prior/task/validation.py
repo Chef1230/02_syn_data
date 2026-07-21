@@ -92,6 +92,27 @@ def validate_task(
         if len(np.unique(data.query_labels)) < 2:
             issues.append(_issue("query_classes", "query has fewer than two classes"))
 
+    if plan.row_cutoff_time_column_id is not None:
+        try:
+            cutoff_column = schema.table(plan.target_table_id).column(
+                plan.row_cutoff_time_column_id
+            )
+        except KeyError:
+            issues.append(
+                _issue(
+                    "row_cutoff_column",
+                    "row-specific cutoff column does not exist on target table",
+                )
+            )
+        else:
+            if cutoff_column.kind is not ColumnKind.TIME:
+                issues.append(
+                    _issue(
+                        "row_cutoff_kind",
+                        "row-specific cutoff column must be a time column",
+                    )
+                )
+
     issues.extend(_validate_route_supervision(schema, plan.target_table_id, plan.route_supervision))
 
     if plan.mechanism is TaskMechanism.RELATION_ATTRIBUTE:

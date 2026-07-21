@@ -190,6 +190,52 @@ class RoutedH5Config:
         if not isinstance(self.overwrite, bool):
             raise TypeError("overwrite must be a boolean")
 
+    def to_dict(self) -> dict[str, object]:
+        result = asdict(self)
+        for name in ("task_manifest", "checkpoint", "output_path"):
+            result[name] = str(result[name])
+        return result
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RouterEvaluationConfig:
+    task_manifest: Path
+    checkpoint: Path
+    output_root: Path
+    task_count: int | None = None
+    start_index: int = 0
+    device: str = "auto"
+    mixed_precision: str = "none"
+    artifact_cache_size: int = 16
+    overwrite: bool = False
+
+    def __post_init__(self) -> None:
+        for name in ("task_manifest", "checkpoint", "output_root"):
+            if not isinstance(getattr(self, name), Path):
+                raise TypeError(f"{name} must be pathlib.Path")
+        if self.task_count is not None and (
+            isinstance(self.task_count, bool)
+            or not isinstance(self.task_count, int)
+            or self.task_count < 1
+        ):
+            raise ValueError("task_count must be a positive integer or None")
+        for name in ("start_index", "artifact_cache_size"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if not _valid_device(self.device):
+            raise ValueError("device must be auto, cpu, cuda, cuda:N, or mps")
+        if self.mixed_precision not in {"none", "fp16", "bf16"}:
+            raise ValueError("mixed_precision must be none, fp16, or bf16")
+        if not isinstance(self.overwrite, bool):
+            raise TypeError("overwrite must be a boolean")
+
+    def to_dict(self) -> dict[str, object]:
+        result = asdict(self)
+        for name in ("task_manifest", "checkpoint", "output_root"):
+            result[name] = str(result[name])
+        return result
+
 
 def _valid_device(value: str) -> bool:
     if value in {"auto", "cpu", "cuda", "mps"}:
@@ -199,11 +245,10 @@ def _valid_device(value: str) -> bool:
     index = value.removeprefix("cuda:")
     return index.isdigit()
 
-    def to_dict(self) -> dict[str, object]:
-        result = asdict(self)
-        for name in ("task_manifest", "checkpoint", "output_path"):
-            result[name] = str(result[name])
-        return result
 
-
-__all__ = ["RouterModelConfig", "RouterTrainingConfig", "RoutedH5Config"]
+__all__ = [
+    "RouterEvaluationConfig",
+    "RouterModelConfig",
+    "RouterTrainingConfig",
+    "RoutedH5Config",
+]

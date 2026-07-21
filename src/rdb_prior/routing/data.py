@@ -57,6 +57,7 @@ class RawRoutingTask:
 class RoutedTaskTensors:
     task_id: str
     prediction_type: PredictionType
+    row_ids: torch.Tensor
     target_values: torch.Tensor
     target_missing: torch.Tensor
     target_type_ids: torch.Tensor
@@ -64,6 +65,7 @@ class RoutedTaskTensors:
     support_mask: torch.Tensor
     labels: torch.Tensor
     num_classes: int
+    class_values: tuple[Any, ...]
     path_features: torch.Tensor
     path_costs: torch.Tensor
     path_similarity: torch.Tensor
@@ -100,6 +102,7 @@ class RoutedTaskBatch:
     task_ids: tuple[str, ...]
     prediction_types: tuple[PredictionType, ...]
     num_classes: tuple[int, ...]
+    row_ids: torch.Tensor
     target_values: torch.Tensor
     target_missing: torch.Tensor
     target_type_ids: torch.Tensor
@@ -294,6 +297,7 @@ def collate_routed_tasks(tasks: tuple[RoutedTaskTensors, ...] | list[RoutedTaskT
     column_feature_dim = tasks[0].source_column_features.shape[-1]
 
     target_values = torch.zeros(batch_size, max_rows, max_targets)
+    row_ids = torch.full((batch_size, max_rows), -1, dtype=torch.long)
     target_missing = torch.ones(batch_size, max_rows, max_targets, dtype=torch.bool)
     target_type_ids = torch.zeros(batch_size, max_targets, dtype=torch.long)
     target_column_features = torch.zeros(batch_size, max_targets, column_feature_dim)
@@ -328,6 +332,7 @@ def collate_routed_tasks(tasks: tuple[RoutedTaskTensors, ...] | list[RoutedTaskT
         paths = task.path_features.shape[0]
         columns = task.source_values.shape[2]
         samples = task.source_values.shape[3]
+        row_ids[index, :rows] = task.row_ids
         target_values[index, :rows, :targets] = task.target_values
         target_missing[index, :rows, :targets] = task.target_missing
         target_type_ids[index, :targets] = task.target_type_ids
@@ -354,6 +359,7 @@ def collate_routed_tasks(tasks: tuple[RoutedTaskTensors, ...] | list[RoutedTaskT
         task_ids=tuple(task.task_id for task in tasks),
         prediction_types=tuple(task.prediction_type for task in tasks),
         num_classes=tuple(task.num_classes for task in tasks),
+        row_ids=row_ids,
         target_values=target_values,
         target_missing=target_missing,
         target_type_ids=target_type_ids,
@@ -427,6 +433,7 @@ class RoutingTaskTensorizer:
         row_ids = np.concatenate(
             (support_row_ids, query_row_ids)
         ).astype(np.int64, copy=False)
+        cost_cutoff = _minimum_row_cutoff(raw, row_ids)
         support_mask = np.zeros(len(row_ids), dtype=bool)
         support_mask[: len(support_row_ids)] = True
         target_columns = _visible_columns(
@@ -512,6 +519,7 @@ class RoutingTaskTensorizer:
                 path,
                 rows_per_hop=samples,
                 max_depth=self.config.max_path_depth,
+                max_timestamp=cost_cutoff,
             )
             active_column_indices = [
                 column_index
@@ -573,7 +581,7 @@ class RoutingTaskTensorizer:
                     ] = True
 
         route_targets, route_weights = _route_supervision(raw, paths)
-        labels, num_classes, center, scale = _encode_labels(
+        labels, num_classes, center, scale, class_values = _encode_labels(
             plan.prediction_type,
             support_labels,
             query_labels,
@@ -581,6 +589,7 @@ class RoutingTaskTensorizer:
         return RoutedTaskTensors(
             task_id=plan.task_id,
             prediction_type=plan.prediction_type,
+            row_ids=torch.from_numpy(row_ids),
             target_values=torch.from_numpy(target_values),
             target_missing=torch.from_numpy(target_missing),
             target_type_ids=torch.tensor(
@@ -593,6 +602,7 @@ class RoutingTaskTensorizer:
             support_mask=torch.from_numpy(support_mask),
             labels=torch.from_numpy(labels),
             num_classes=num_classes,
+            class_values=class_values,
             path_features=torch.from_numpy(
                 np.stack(
                     [
@@ -711,6 +721,7 @@ def _traverse_path(
     seed_key: str,
 ) -> tuple[np.ndarray, int, int]:
     current = np.asarray([start_row], dtype=np.int64)
+    row_cutoff = _row_cutoff(raw, start_row)
     total_reads = 0
     total_expanded = 0
     fks = {fk.foreign_key_id: fk for fk in raw.schema.foreign_keys}
@@ -722,7 +733,11 @@ def _traverse_path(
             assignments = raw.database.table(
                 foreign_key.child_table_id
             ).column(foreign_key.child_column_id)
-            visible = raw.view.row_masks[foreign_key.child_table_id]
+            visible = _visible_row_mask(
+                raw,
+                foreign_key.child_table_id,
+                max_timestamp=row_cutoff,
+            )
             following = np.flatnonzero(
                 visible & np.isin(assignments, current)
             ).astype(np.int64)
@@ -732,7 +747,11 @@ def _traverse_path(
             ).column(foreign_key.child_column_id)
             parents = assignments[current]
             following = np.unique(parents[parents >= 0]).astype(np.int64)
-            visible = raw.view.row_masks[foreign_key.parent_table_id]
+            visible = _visible_row_mask(
+                raw,
+                foreign_key.parent_table_id,
+                max_timestamp=row_cutoff,
+            )
             following = following[visible[following]]
         total_expanded += len(following)
         cap = int(rng.integers(min_rows, max_rows + 1))
@@ -754,6 +773,7 @@ def _estimated_path_cost(
     *,
     rows_per_hop: int,
     max_depth: int,
+    max_timestamp: int | None = None,
 ) -> np.ndarray:
     """Estimate fanout/read cost without traversing candidate feature data."""
     fks = {fk.foreign_key_id: fk for fk in raw.schema.foreign_keys}
@@ -761,15 +781,40 @@ def _estimated_path_cost(
     expected_rows = 1.0
     for hop in path.hops:
         foreign_key = fks[hop.foreign_key_id]
-        child_rows = raw.view.visible_rows(foreign_key.child_table_id)
+        child_rows = np.flatnonzero(
+            _visible_row_mask(
+                raw,
+                foreign_key.child_table_id,
+                max_timestamp=max_timestamp,
+            )
+        ).astype(np.int64)
         assignments = raw.database.table(foreign_key.child_table_id).column(
             foreign_key.child_column_id
         )[child_rows]
-        valid = assignments[assignments >= 0]
+        valid_mask = assignments >= 0
+        if np.any(valid_mask):
+            parent_visible = _visible_row_mask(
+                raw,
+                foreign_key.parent_table_id,
+                max_timestamp=max_timestamp,
+            )
+            valid_indices = np.flatnonzero(valid_mask)
+            valid_mask[valid_indices] &= parent_visible[
+                assignments[valid_indices]
+            ]
+        valid = assignments[valid_mask]
         if hop.parent_to_child:
             parent_count = max(
                 1,
-                len(raw.view.visible_rows(foreign_key.parent_table_id)),
+                int(
+                    np.count_nonzero(
+                        _visible_row_mask(
+                            raw,
+                            foreign_key.parent_table_id,
+                            max_timestamp=max_timestamp,
+                        )
+                    )
+                ),
             )
             expansion = len(valid) / parent_count
         else:
@@ -790,6 +835,50 @@ def _estimated_path_cost(
         ],
         dtype=np.float32,
     )
+
+
+def _minimum_row_cutoff(
+    raw: RawRoutingTask,
+    row_ids: np.ndarray,
+) -> int | None:
+    column_id = raw.task_artifact.task.plan.row_cutoff_time_column_id
+    if column_id is None:
+        return None
+    values = raw.database.table(
+        raw.task_artifact.task.plan.target_table_id
+    ).column(column_id)[row_ids]
+    valid = values[values >= 0]
+    return None if not len(valid) else int(np.min(valid))
+
+
+def _row_cutoff(raw: RawRoutingTask, start_row: int) -> int | None:
+    column_id = raw.task_artifact.task.plan.row_cutoff_time_column_id
+    if column_id is None:
+        return None
+    value = raw.database.table(
+        raw.task_artifact.task.plan.target_table_id
+    ).column(column_id)[start_row]
+    return None if int(value) < 0 else int(value)
+
+
+def _visible_row_mask(
+    raw: RawRoutingTask,
+    table_id: str,
+    *,
+    max_timestamp: int | None,
+) -> np.ndarray:
+    visible = raw.view.row_masks[table_id]
+    if max_timestamp is None:
+        return visible
+    rules = {
+        rule.table_id: rule
+        for rule in raw.task_artifact.task.plan.observation_rules
+    }
+    rule = rules.get(table_id)
+    if rule is None:
+        return visible
+    values = raw.database.table(table_id).column(rule.time_column_id)
+    return visible & (values >= 0) & (values <= max_timestamp)
 
 
 def _selection_mask(
@@ -849,7 +938,7 @@ def _encode_labels(
     prediction_type: PredictionType,
     support_labels: np.ndarray,
     query_labels: np.ndarray,
-) -> tuple[np.ndarray, int, float, float]:
+) -> tuple[np.ndarray, int, float, float, tuple[Any, ...]]:
     values = np.concatenate((support_labels, query_labels))
     if prediction_type is PredictionType.CLASSIFICATION:
         classes = np.unique(support_labels)
@@ -858,14 +947,14 @@ def _encode_labels(
             encoded = np.asarray([mapping[value] for value in values], dtype=np.int64)
         except KeyError as error:
             raise ValueError("query label is absent from support classes") from error
-        return encoded, len(classes), 0.0, 1.0
+        return encoded, len(classes), 0.0, 1.0, tuple(classes.tolist())
     support = support_labels.astype(np.float64, copy=False)
     center = float(np.mean(support))
     scale = float(np.std(support))
     if not np.isfinite(scale) or scale < 1e-6:
         scale = 1.0
     encoded = ((values.astype(np.float64) - center) / scale).astype(np.float32)
-    return encoded, 1, center, scale
+    return encoded, 1, center, scale, ()
 
 
 def _bounded_task_rows(
