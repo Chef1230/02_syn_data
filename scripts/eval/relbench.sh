@@ -15,6 +15,11 @@ RELBENCH_METADATA="${RELBENCH_METADATA:-${RELBENCH_OUTPUT}/relbench_metadata.jso
 RELBENCH_METRICS_OUTPUT="${RELBENCH_METRICS_OUTPUT:-${ROUTER_EVAL_OUTPUT}/relbench_metrics.json}"
 ROUTED_H5_OUTPUT="${ROUTED_H5_OUTPUT:-${RELBENCH_OUTPUT}/routed.h5}"
 CONFIG_PATH="${CONFIG_PATH:-${RDB_PRIOR_CONFIG:-${PROJECT_ROOT}/configs/refactor_v2.yaml}}"
+RDBPFN_ROOT="${RDBPFN_ROOT:-${PROJECT_ROOT}/../RDBPFN}"
+MODEL_ROOT="${RDBPFN_ROOT}/model_pretrain"
+TFM_MODEL_CONFIG="${TFM_MODEL_CONFIG:-${MODEL_ROOT}/conf_train/RDBPFN_routed.yaml}"
+TFM_PREDICTIONS_OUTPUT="${TFM_PREDICTIONS_OUTPUT:-${RELBENCH_OUTPUT}/tfm_eval/predictions.jsonl}"
+TFM_METRICS_OUTPUT="${TFM_METRICS_OUTPUT:-${RELBENCH_OUTPUT}/tfm_eval/relbench_metrics.json}"
 
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
@@ -91,25 +96,79 @@ run_eval() {
 }
 
 run_score() {
+  local predictions="${1:-${ROUTER_EVAL_OUTPUT}/predictions.jsonl}"
+  local metrics_output="${2:-${RELBENCH_METRICS_OUTPUT}}"
   if [[ ! -f "${RELBENCH_METADATA}" ]]; then
     echo "RelBench metadata does not exist: ${RELBENCH_METADATA}" >&2
     exit 2
   fi
-  if [[ ! -f "${ROUTER_EVAL_OUTPUT}/predictions.jsonl" ]]; then
-    echo "Router predictions do not exist: ${ROUTER_EVAL_OUTPUT}/predictions.jsonl" >&2
+  if [[ ! -f "${predictions}" ]]; then
+    echo "Predictions do not exist: ${predictions}" >&2
     exit 2
   fi
   local args=(
     relbench-score
     --metadata "${RELBENCH_METADATA}"
-    --predictions "${ROUTER_EVAL_OUTPUT}/predictions.jsonl"
-    --output "${RELBENCH_METRICS_OUTPUT}"
+    --predictions "${predictions}"
+    --output "${metrics_output}"
     "$(bool_arg "${SCORE_DOWNLOAD:-0}" --download --no-download)"
     "$(bool_arg "${OVERWRITE:-0}" --overwrite --no-overwrite)"
   )
   [[ -n "${LOG_LEVEL:-}" ]] && args+=(--log-level "${LOG_LEVEL}")
   [[ -n "${LOG_FILE:-}" ]] && args+=(--log-file "${LOG_FILE}")
   "${PYTHON_BIN}" -m rdb_prior.cli "${args[@]}"
+}
+
+run_tfm() {
+  if [[ -z "${TFM_CHECKPOINT:-}" ]]; then
+    echo "Set TFM_CHECKPOINT to checkpoints/RDBPFN_routed/model.pt." >&2
+    exit 2
+  fi
+  for path in "${ROUTED_H5_OUTPUT}" "${TFM_CHECKPOINT}" "${TFM_MODEL_CONFIG}"; do
+    if [[ ! -f "${path}" ]]; then
+      echo "Required TFM inference file does not exist: ${path}" >&2
+      exit 2
+    fi
+  done
+  local args=(
+    -m src.routed_eval
+    --input "${ROUTED_H5_OUTPUT}"
+    --checkpoint "${TFM_CHECKPOINT}"
+    --model-config "${TFM_MODEL_CONFIG}"
+    --output "${TFM_PREDICTIONS_OUTPUT}"
+    --device "${DEVICE:-auto}"
+    --mixed-precision "${MIXED_PRECISION:-none}"
+    --progress-every "${PROGRESS_EVERY:-10}"
+  )
+  [[ -n "${NUM_TASKS:-}" ]] && args+=(--count "${NUM_TASKS}")
+  [[ -n "${START_INDEX:-}" ]] && args+=(--start-index "${START_INDEX}")
+  case "${OVERWRITE:-0}" in
+    1|true|TRUE|yes|YES) args+=(--overwrite) ;;
+    0|false|FALSE|no|NO) ;;
+    *) echo "OVERWRITE must be true/false" >&2; exit 2 ;;
+  esac
+  local status=0
+  if (
+      cd "${MODEL_ROOT}"
+      PYTHONPATH="${MODEL_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+        "${PYTHON_BIN}" "${args[@]}"
+  ); then
+    status=0
+  else
+    status=$?
+  fi
+  if [[ "${status}" == "3" ]]; then
+    echo "Skipping TFM scoring because routed H5 has no supported binary classification tasks."
+    return 0
+  fi
+  if [[ "${status}" != "0" ]]; then
+    return "${status}"
+  fi
+  if [[ -n "${NUM_TASKS:-}" || ( -n "${START_INDEX:-}" && "${START_INDEX}" != "0" ) ]]; then
+    echo "Skipping official RelBench metrics for a partial TFM task selection."
+  else
+    run_score "${TFM_PREDICTIONS_OUTPUT}" "${TFM_METRICS_OUTPUT}"
+  fi
 }
 
 run_h5() {
@@ -140,13 +199,19 @@ case "${ACTION}" in
   eval) run_eval ;;
   score) run_score ;;
   h5) run_h5 ;;
+  tfm) run_tfm ;;
+  pipeline)
+    run_convert
+    run_h5
+    run_tfm
+    ;;
   all)
     run_convert
     run_eval
     run_h5
     ;;
   *)
-    echo "Usage: bash scripts/eval/relbench.sh [convert|eval|score|h5|all]" >&2
+    echo "Usage: bash scripts/eval/relbench.sh [convert|eval|score|h5|tfm|pipeline|all]" >&2
     exit 2
     ;;
 esac

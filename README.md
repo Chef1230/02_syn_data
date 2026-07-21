@@ -507,6 +507,13 @@ RELBENCH_DATASET=rel-amazon RELBENCH_TASK=user-churn \
 ROUTER_CHECKPOINT=/absolute/path/to/router/checkpoints/best.pt \
 DEVICE=cuda OVERWRITE=1 \
 bash scripts/eval/relbench.sh h5
+
+# Consume routed.h5 with the stage-06 TFM checkpoint and run official scoring.
+CUDA_VISIBLE_DEVICES=5 \
+RELBENCH_DATASET=rel-amazon RELBENCH_TASK=user-churn \
+TFM_CHECKPOINT=/absolute/path/to/checkpoints/RDBPFN_routed/model.pt \
+DEVICE=cuda MIXED_PRECISION=bf16 OVERWRITE=1 \
+bash scripts/eval/relbench.sh tfm
 ```
 
 `bash scripts/eval/relbench.sh all` runs convert, router eval, and H5 export in
@@ -515,9 +522,18 @@ writes official `task.evaluate()` results to
 `router_eval/relbench_metrics.json`; bounded `NUM_TASKS`/`START_INDEX` runs skip
 that official score because their prediction set is incomplete. Set
 `SUPPORT_ROWS`, `MAX_CLASSES`, `RELBENCH_OUTPUT`,
-`ROUTER_EVAL_OUTPUT`, `ROUTED_H5_OUTPUT`, `NUM_TASKS`, or `START_INDEX` through
-environment variables when needed. For a cached/offline RelBench dataset, set
-`DOWNLOAD=0`.
+`ROUTER_EVAL_OUTPUT`, `ROUTED_H5_OUTPUT`, `TFM_CHECKPOINT`,
+`TFM_MODEL_CONFIG`, `TFM_PREDICTIONS_OUTPUT`, `NUM_TASKS`, or `START_INDEX`
+through environment variables when needed. For a cached/offline RelBench
+dataset, set `DOWNLOAD=0`. The `tfm` action streams one independently shaped
+binary routed task at a time, writes only query-row probabilities, and then
+restores official RelBench test order for scoring.
+
+Run the final end-to-end benchmark path with `pipeline`: it converts RelBench,
+uses the Router checkpoint to export `routed.h5`, consumes that file with the
+stage-06 TFM checkpoint, and runs official scoring. Routed regression and
+multiclass groups are skipped because the current TFM contract is binary-only;
+if no supported task remains, the pipeline reports `skipped` and exits cleanly.
 
 Evaluate a trained checkpoint directly on those query rows:
 
