@@ -17,7 +17,7 @@ if [[ ! -d "${RDBPFN_ROOT}/model_pretrain" && -d "${PROJECT_ROOT}/../RDB_PFN/mod
 fi
 MODEL_ROOT="${RDBPFN_ROOT}/model_pretrain"
 TFM_CONFIG_NAME="${TFM_CONFIG_NAME:-RDBPFN_routed}"
-ROUTED_H5_PATH="${ROUTED_H5_OUTPUT:-${PROJECT_ROOT}/outputs/refactor_v2/routed/routed_tasks.h5}"
+ROUTED_H5_PATH="${ROUTED_H5_OUTPUT:-}"
 NUM_PROCESSES="${NUM_PROCESSES:-1}"
 
 if [[ ! -f "${CONFIG_PATH}" ]]; then
@@ -39,9 +39,9 @@ if [[ ! -f "${MODEL_ROOT}/src/routed_dataloader.py" ]] || \
   echo "Sync the routed-enabled model_pretrain sources before running stage 06." >&2
   exit 2
 fi
-if [[ ! -f "${ROUTED_H5_PATH}" ]]; then
+if [[ -n "${ROUTED_H5_PATH}" && ! -f "${ROUTED_H5_PATH}" ]]; then
   echo "Routed H5 does not exist: ${ROUTED_H5_PATH}" >&2
-  echo "Run scripts/v1/05_routed_h5.sh first or set ROUTED_H5_OUTPUT." >&2
+  echo "Run scripts/v1/05_routed_h5.sh first or correct ROUTED_H5_OUTPUT." >&2
   exit 2
 fi
 if ! [[ "${NUM_PROCESSES}" =~ ^[1-9][0-9]*$ ]]; then
@@ -62,12 +62,12 @@ fi
 
 TRAIN_ARGS=(
   --config-name "${TFM_CONFIG_NAME}"
-  "train.datasets.0.path=${ROUTED_H5_PATH}"
   "++train.datasets.0.format=routed_tokens"
   "train.num_gpus=${NUM_PROCESSES}"
   "train.batch_size=1"
   "++model.enable_routed_tokens=true"
 )
+[[ -n "${ROUTED_H5_PATH}" ]] && TRAIN_ARGS+=("train.datasets.0.path=${ROUTED_H5_PATH}")
 [[ -n "${TFM_SAVE_EVERY_EVALS:-}" ]] && TRAIN_ARGS+=("train.save_every_evals=${TFM_SAVE_EVERY_EVALS}")
 [[ -n "${TFM_FIND_UNUSED_PARAMETERS:-}" ]] && TRAIN_ARGS+=("train.find_unused_parameters=${TFM_FIND_UNUSED_PARAMETERS}")
 [[ -n "${TFM_NUM_STEPS:-}" ]] && TRAIN_ARGS+=("train.num_steps=${TFM_NUM_STEPS}")
@@ -78,7 +78,11 @@ TRAIN_ARGS=(
 [[ -n "${ROUTED_TOKEN_DIM:-}" ]] && TRAIN_ARGS+=("model.routed_token_dim=${ROUTED_TOKEN_DIM}")
 
 echo "Synthetic config: ${CONFIG_PATH}"
-echo "Routed H5:       ${ROUTED_H5_PATH}"
+if [[ -n "${ROUTED_H5_PATH}" ]]; then
+  echo "Routed H5:       ${ROUTED_H5_PATH} (environment override)"
+else
+  echo "Routed H5:       from conf_train/${TFM_CONFIG_NAME}.yaml"
+fi
 echo "TFM root:        ${MODEL_ROOT}"
 echo "Processes:       ${NUM_PROCESSES} (batch_size=1 per process)"
 

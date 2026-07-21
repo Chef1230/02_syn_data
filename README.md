@@ -446,6 +446,9 @@ overrides are `RDBPFN_ROOT`, `ROUTED_H5_OUTPUT`, `NUM_PROCESSES`,
 `TFM_LOAD_CHECKPOINT`, and `TFM_SAVE_CHECKPOINT`. Additional arguments are
 forwarded as Hydra overrides.
 
+Stage 06 reads the routed H5 path from the selected TFM YAML by default.
+Set `ROUTED_H5_OUTPUT` only when the YAML path should be overridden.
+
 Checkpoints are written below `OUTPUT_DIR/router/checkpoints/`. The H5 file at
 `OUTPUT_DIR/routed/routed_tasks.h5` stores per-task target tokens, selected
 relation-column tokens and masks, support/query mask, labels, route/column
