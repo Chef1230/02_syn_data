@@ -19,6 +19,7 @@ MODEL_ROOT="${RDBPFN_ROOT}/model_pretrain"
 TFM_CONFIG_NAME="${TFM_CONFIG_NAME:-RDBPFN_routed}"
 ROUTED_H5_PATH="${ROUTED_H5_OUTPUT:-${PROJECT_ROOT}/outputs/refactor_v2/routed/routed_tasks.h5}"
 NUM_PROCESSES="${NUM_PROCESSES:-1}"
+TFM_SAVE_EVERY_EVALS="${TFM_SAVE_EVERY_EVALS:-8}"
 
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "Synthetic-data config does not exist: ${CONFIG_PATH}" >&2
@@ -55,6 +56,7 @@ TRAIN_ARGS=(
   "train.datasets.0.path=${ROUTED_H5_PATH}"
   "train.num_gpus=${NUM_PROCESSES}"
   "train.batch_size=1"
+  "++train.save_every_evals=${TFM_SAVE_EVERY_EVALS}"
 )
 [[ -n "${TFM_NUM_STEPS:-}" ]] && TRAIN_ARGS+=("train.num_steps=${TFM_NUM_STEPS}")
 [[ -n "${TFM_NUM_EPOCHS:-}" ]] && TRAIN_ARGS+=("train.num_epochs=${TFM_NUM_EPOCHS}")
@@ -67,6 +69,7 @@ echo "Synthetic config: ${CONFIG_PATH}"
 echo "Routed H5:       ${ROUTED_H5_PATH}"
 echo "TFM root:        ${MODEL_ROOT}"
 echo "Processes:       ${NUM_PROCESSES} (batch_size=1 per process)"
+echo "Save cadence:    every ${TFM_SAVE_EVERY_EVALS} evals"
 
 cd "${MODEL_ROOT}"
 export PYTHONPATH="${MODEL_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
