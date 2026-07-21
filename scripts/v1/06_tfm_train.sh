@@ -59,6 +59,7 @@ fi
 TRAIN_ARGS=(
   --config-name "${TFM_CONFIG_NAME}"
   "train.datasets.0.path=${ROUTED_H5_PATH}"
+  "++train.datasets.0.format=routed_tokens"
   "train.num_gpus=${NUM_PROCESSES}"
   "train.batch_size=1"
   "++train.save_every_evals=${TFM_SAVE_EVERY_EVALS}"
@@ -68,6 +69,7 @@ TRAIN_ARGS=(
   "++model.invariant_noise_encoder=false"
   "++model.dual_feature_attention=false"
   "++model.category_as_numeric=false"
+  "++model.enable_routed_tokens=true"
 )
 [[ -n "${TFM_NUM_STEPS:-}" ]] && TRAIN_ARGS+=("train.num_steps=${TFM_NUM_STEPS}")
 [[ -n "${TFM_NUM_EPOCHS:-}" ]] && TRAIN_ARGS+=("train.num_epochs=${TFM_NUM_EPOCHS}")
