@@ -19,8 +19,6 @@ MODEL_ROOT="${RDBPFN_ROOT}/model_pretrain"
 TFM_CONFIG_NAME="${TFM_CONFIG_NAME:-RDBPFN_routed}"
 ROUTED_H5_PATH="${ROUTED_H5_OUTPUT:-${PROJECT_ROOT}/outputs/refactor_v2/routed/routed_tasks.h5}"
 NUM_PROCESSES="${NUM_PROCESSES:-1}"
-TFM_SAVE_EVERY_EVALS="${TFM_SAVE_EVERY_EVALS:-8}"
-TFM_FIND_UNUSED_PARAMETERS="${TFM_FIND_UNUSED_PARAMETERS:-true}"
 
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "Synthetic-data config does not exist: ${CONFIG_PATH}" >&2
@@ -33,6 +31,12 @@ if [[ ! -d "${MODEL_ROOT}" ]]; then
 fi
 if [[ ! -f "${MODEL_ROOT}/conf_train/${TFM_CONFIG_NAME}.yaml" ]]; then
   echo "TFM config does not exist: ${MODEL_ROOT}/conf_train/${TFM_CONFIG_NAME}.yaml" >&2
+  exit 2
+fi
+if [[ ! -f "${MODEL_ROOT}/src/routed_dataloader.py" ]] || \
+   ! grep -q "RoutedTokenDataset" "${MODEL_ROOT}/src/train.py"; then
+  echo "RDBPFN does not contain routed-token training support: ${MODEL_ROOT}" >&2
+  echo "Sync the routed-enabled model_pretrain sources before running stage 06." >&2
   exit 2
 fi
 if [[ ! -f "${ROUTED_H5_PATH}" ]]; then
@@ -62,15 +66,10 @@ TRAIN_ARGS=(
   "++train.datasets.0.format=routed_tokens"
   "train.num_gpus=${NUM_PROCESSES}"
   "train.batch_size=1"
-  "++train.save_every_evals=${TFM_SAVE_EVERY_EVALS}"
-  "++train.find_unused_parameters=${TFM_FIND_UNUSED_PARAMETERS}"
-  "++model.per_column_embeddings=false"
-  "++model.sort_category_embeddings=false"
-  "++model.invariant_noise_encoder=false"
-  "++model.dual_feature_attention=false"
-  "++model.category_as_numeric=false"
   "++model.enable_routed_tokens=true"
 )
+[[ -n "${TFM_SAVE_EVERY_EVALS:-}" ]] && TRAIN_ARGS+=("train.save_every_evals=${TFM_SAVE_EVERY_EVALS}")
+[[ -n "${TFM_FIND_UNUSED_PARAMETERS:-}" ]] && TRAIN_ARGS+=("train.find_unused_parameters=${TFM_FIND_UNUSED_PARAMETERS}")
 [[ -n "${TFM_NUM_STEPS:-}" ]] && TRAIN_ARGS+=("train.num_steps=${TFM_NUM_STEPS}")
 [[ -n "${TFM_NUM_EPOCHS:-}" ]] && TRAIN_ARGS+=("train.num_epochs=${TFM_NUM_EPOCHS}")
 [[ -n "${TFM_LR:-}" ]] && TRAIN_ARGS+=("train.lr=${TFM_LR}")
@@ -82,8 +81,6 @@ echo "Synthetic config: ${CONFIG_PATH}"
 echo "Routed H5:       ${ROUTED_H5_PATH}"
 echo "TFM root:        ${MODEL_ROOT}"
 echo "Processes:       ${NUM_PROCESSES} (batch_size=1 per process)"
-echo "Save cadence:    every ${TFM_SAVE_EVERY_EVALS} evals"
-echo "DDP unused params: ${TFM_FIND_UNUSED_PARAMETERS}"
 
 cd "${MODEL_ROOT}"
 export PYTHONPATH="${MODEL_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
