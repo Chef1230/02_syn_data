@@ -561,7 +561,11 @@ bash scripts/eval/relbench.sh pipeline configs/eval/relbench_f1.yaml
 
 The supported YAML sections are `relbench`, `router`, `h5`, `tfm`, and
 `runtime`. Unknown or misspelled fields fail immediately instead of silently
-falling back to defaults.
+falling back to defaults. With `relbench.reuse_converted: true`, conversion is
+skipped when the metadata plus schema, instance, and task manifests are all
+present. Set it to `false` after changing conversion or query-chunk parameters
+to force a rebuild. RelBench import progress covers each database table,
+schema and instance writes, every query chunk, and final metadata.
 
 Evaluate a trained checkpoint directly on those query rows:
 

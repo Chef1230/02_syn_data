@@ -26,6 +26,7 @@ class EvalConfigTests(unittest.TestCase):
                         "  tasks: [driver-dnf, driver-top3]",
                         "  output: outputs/f1",
                         "  download: false",
+                        "  reuse_converted: true",
                         "router:",
                         "  checkpoint: checkpoints/router.pt",
                         "runtime:",
@@ -40,6 +41,7 @@ class EvalConfigTests(unittest.TestCase):
             self.assertEqual(values["RELBENCH_DATASET"], "rel-f1")
             self.assertEqual(values["RELBENCH_TASKS"], "driver-dnf,driver-top3")
             self.assertEqual(values["DOWNLOAD"], "0")
+            self.assertEqual(values["REUSE_CONVERTED"], "1")
             self.assertEqual(values["PROGRESS_EVERY"], "1")
             self.assertEqual(values["RELBENCH_OUTPUT"], str(root / "outputs/f1"))
             self.assertEqual(

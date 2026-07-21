@@ -53,6 +53,27 @@ require_checkpoint() {
 }
 
 run_convert() {
+  case "${REUSE_CONVERTED:-0}" in
+    1|true|TRUE|yes|YES)
+      local required
+      for required in \
+          "${RELBENCH_METADATA}" \
+          "${TASK_MANIFEST}" \
+          "${RELBENCH_OUTPUT}/schema/manifest.json" \
+          "${RELBENCH_OUTPUT}/instance/manifest.json"; do
+        if [[ ! -f "${required}" ]]; then
+          required=""
+          break
+        fi
+      done
+      if [[ -n "${required}" ]]; then
+        echo "[relbench-import] reusing converted artifacts: ${RELBENCH_OUTPUT}"
+        return 0
+      fi
+      ;;
+    0|false|FALSE|no|NO) ;;
+    *) echo "REUSE_CONVERTED must be true/false" >&2; exit 2 ;;
+  esac
   local args=(
     relbench-import
     --dataset "${RELBENCH_DATASET}"

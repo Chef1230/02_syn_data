@@ -6,6 +6,7 @@ relbench:
   output_root: outputs/relbench/rel-f1
   download: false
   score_download: false
+  reuse_converted: true
   seed: 0
   max_rows_per_task: 600
   query_rows_per_task: 256

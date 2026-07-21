@@ -264,6 +264,16 @@ def convert_relbench_objects(
         )
 
     combined = _concat_split_frames(split_frames)
+    train_count = len(split_frames["train"])
+    validation_count = len(split_frames["val"])
+    support_total = train_count + validation_count
+    query_total = len(split_frames["test"])
+    total_chunks = (
+        query_total + config.query_rows_per_task - 1
+    ) // config.query_rows_per_task
+    progress_total = len(database.table_dict) + total_chunks + 3
+    if progress is not None:
+        progress(0, progress_total, "prepare")
     timestamp_origin_ns = _timestamp_origin_ns(
         database, anchor_series=combined[time_column]
     )
@@ -277,10 +287,6 @@ def convert_relbench_objects(
         prediction_type=prediction_type,
         max_text_length=config.max_text_length,
     )
-    train_count = len(split_frames["train"])
-    validation_count = len(split_frames["val"])
-    support_total = train_count + validation_count
-    query_total = len(split_frames["test"])
     support_labels_all = labels[:support_total]
     query_labels_all = labels[support_total:]
     support_indices = _sample_support_indices(
@@ -323,6 +329,8 @@ def convert_relbench_objects(
         labels=labels,
         max_text_length=config.max_text_length,
         timestamp_origin_ns=timestamp_origin_ns,
+        progress=progress,
+        progress_total=progress_total,
     )
     physical_tables = tuple(
         item.table for item in converted.tables
@@ -373,6 +381,8 @@ def convert_relbench_objects(
             },
         ),
     )
+    if progress is not None:
+        progress(len(database.table_dict) + 1, progress_total, "schema")
 
     instance_plan = _instance_plan(
         schema,
@@ -423,6 +433,8 @@ def convert_relbench_objects(
             },
         ),
     )
+    if progress is not None:
+        progress(len(database.table_dict) + 2, progress_total, "instance")
 
     observation_rules = tuple(
         ObservationRule(
@@ -447,9 +459,6 @@ def convert_relbench_objects(
     task_entries: list[dict[str, Any]] = []
     query_chunks: list[dict[str, Any]] = []
     query_offsets = range(0, query_total, config.query_rows_per_task)
-    total_chunks = (
-        query_total + config.query_rows_per_task - 1
-    ) // config.query_rows_per_task
     support_row_ids = support_indices.astype(np.int64, copy=False)
     support_labels = labels[support_row_ids]
     for chunk_index, query_start in enumerate(query_offsets):
@@ -544,7 +553,11 @@ def convert_relbench_objects(
             }
         )
         if progress is not None:
-            progress(chunk_index + 1, total_chunks, task_id)
+            progress(
+                len(database.table_dict) + 3 + chunk_index,
+                progress_total,
+                task_id,
+            )
 
     task_manifest = task_writer.write_manifest(
         configuration={
@@ -629,6 +642,8 @@ def convert_relbench_objects(
             "configuration": config.to_dict(),
         },
     )
+    if progress is not None:
+        progress(progress_total, progress_total, "metadata")
     return RelBenchImportResult(
         output_root=config.output_root,
         schema_manifest=schema_manifest,
@@ -681,6 +696,8 @@ def _convert_database(
     labels: np.ndarray,
     max_text_length: int,
     timestamp_origin_ns: int,
+    progress: Callable[[int, int, str], None] | None,
+    progress_total: int,
 ) -> _ConvertedDatabase:
     original_names = tuple(sorted(database.table_dict))
     table_ids = {
@@ -730,7 +747,13 @@ def _convert_database(
     fk_arrays: dict[tuple[str, str, str], np.ndarray] = {}
     fk_column_ids: dict[tuple[str, str, str], str] = {}
     time_column_ids: dict[str, str | None] = {}
-    for original_name in original_names:
+    for table_index, original_name in enumerate(original_names):
+        if progress is not None:
+            progress(
+                table_index,
+                progress_total,
+                f"table:{original_name}:start",
+            )
         rel_table = database.table_dict[original_name]
         frame = rel_table.df.reset_index(drop=True)
         table_id = table_ids[original_name]
@@ -871,6 +894,12 @@ def _convert_database(
                 column_mapping=tuple(mapping),
             )
         )
+        if progress is not None:
+            progress(
+                table_index + 1,
+                progress_total,
+                f"table:{original_name}",
+            )
 
     foreign_keys: list[PhysicalForeignKey] = []
     table_map = {table.original_name: table for table in converted_tables}

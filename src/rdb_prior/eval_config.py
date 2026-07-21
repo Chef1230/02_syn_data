@@ -21,6 +21,7 @@ _FIELDS: dict[tuple[str, str], tuple[str, str]] = {
     ("relbench", "metadata"): ("RELBENCH_METADATA", "path"),
     ("relbench", "download"): ("DOWNLOAD", "boolean"),
     ("relbench", "score_download"): ("SCORE_DOWNLOAD", "boolean"),
+    ("relbench", "reuse_converted"): ("REUSE_CONVERTED", "boolean"),
     ("relbench", "seed"): ("SEED", "integer"),
     ("relbench", "max_rows_per_task"): ("MAX_ROWS_PER_TASK", "integer"),
     ("relbench", "query_rows_per_task"): (

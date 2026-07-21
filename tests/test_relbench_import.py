@@ -149,6 +149,7 @@ class RelBenchImportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "relbench"
             dataset, task = self._objects()
+            progress: list[tuple[int, int, str]] = []
             result = convert_relbench_objects(
                 RelBenchImportConfig(
                     dataset_name="rel-fake",
@@ -160,6 +161,9 @@ class RelBenchImportTests(unittest.TestCase):
                 ),
                 dataset=dataset,
                 task=task,
+                progress=lambda completed, total, item: progress.append(
+                    (completed, total, item)
+                ),
             )
             self.assertEqual(2, result.task_count)
             self.assertEqual(3, result.query_row_count)
@@ -167,6 +171,11 @@ class RelBenchImportTests(unittest.TestCase):
                 result.task_manifest.read_text(encoding="utf-8")
             )
             self.assertEqual(2, manifest["task_count"])
+            self.assertEqual((0, 7, "prepare"), progress[0])
+            self.assertEqual((7, 7, "metadata"), progress[-1])
+            items = [item for _completed, _total, item in progress]
+            for expected in ("table:events", "table:users", "schema", "instance"):
+                self.assertIn(expected, items)
 
             store = RoutingTaskStore(result.task_manifest, cache_size=1)
             raw_tasks = [store.load(reference) for reference in store.references]
