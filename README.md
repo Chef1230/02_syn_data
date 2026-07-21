@@ -535,6 +535,34 @@ stage-06 TFM checkpoint, and runs official scoring. Routed regression and
 multiclass groups are skipped because the current TFM contract is binary-only;
 if no supported task remains, the pipeline reports `skipped` and exits cleanly.
 
+Run every cached task for one RelBench dataset with
+`scripts/eval/relbench_all.sh`. The wrapper discovers task directories under
+`$RELBENCH_CACHE_DIR/<dataset>/tasks`, converts each task, and continues only
+for binary classification. Regression, multiclass, link, recommendation, and
+other unsupported targets are reported as skipped without stopping later
+tasks. Set comma-separated `RELBENCH_TASKS` to run an explicit subset.
+
+Evaluation parameters can be stored in a strict YAML file under
+`configs/eval/`. Relative paths in these files are resolved against the
+`02_syn_data` project root. Environment variables have higher priority than
+YAML values, which makes one-off overrides possible without editing the file.
+
+```bash
+# One RelBench task: convert -> routed H5 -> TFM inference -> official score.
+bash scripts/eval/relbench.sh pipeline configs/eval/relbench_f1.yaml
+
+# Every cached task for the configured dataset.
+bash scripts/eval/relbench_all.sh configs/eval/relbench_amazon.yaml
+
+# Override one YAML value for a single run.
+CUDA_VISIBLE_DEVICES=6 PROGRESS_EVERY=5 \
+bash scripts/eval/relbench.sh pipeline configs/eval/relbench_f1.yaml
+```
+
+The supported YAML sections are `relbench`, `router`, `h5`, `tfm`, and
+`runtime`. Unknown or misspelled fields fail immediately instead of silently
+falling back to defaults.
+
 Evaluate a trained checkpoint directly on those query rows:
 
 ```bash

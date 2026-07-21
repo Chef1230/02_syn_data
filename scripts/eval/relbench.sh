@@ -5,6 +5,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 ACTION="${1:-convert}"
+EVAL_CONFIG_PATH="${2:-${EVAL_CONFIG:-}}"
+
+if [[ -n "${EVAL_CONFIG_PATH}" ]]; then
+  # shellcheck source=scripts/eval/config.sh
+  source "${SCRIPT_DIR}/config.sh"
+  load_eval_config "${EVAL_CONFIG_PATH}"
+fi
 
 RELBENCH_DATASET="${RELBENCH_DATASET:-rel-amazon}"
 RELBENCH_TASK="${RELBENCH_TASK:-user-churn}"
@@ -139,6 +146,7 @@ run_tfm() {
     --device "${DEVICE:-auto}"
     --mixed-precision "${MIXED_PRECISION:-none}"
     --progress-every "${PROGRESS_EVERY:-10}"
+    --progress-width "${PROGRESS_WIDTH:-28}"
   )
   [[ -n "${NUM_TASKS:-}" ]] && args+=(--count "${NUM_TASKS}")
   [[ -n "${START_INDEX:-}" ]] && args+=(--start-index "${START_INDEX}")
@@ -185,6 +193,7 @@ run_h5() {
     --output "${ROUTED_H5_OUTPUT}"
     --device "${DEVICE:-auto}"
     "$(bool_arg "${OVERWRITE:-0}" --overwrite --no-overwrite)"
+    --progress
   )
   [[ -n "${NUM_TASKS:-}" ]] && args+=(--count "${NUM_TASKS}")
   [[ -n "${START_INDEX:-}" ]] && args+=(--start-index "${START_INDEX}")
@@ -211,7 +220,7 @@ case "${ACTION}" in
     run_h5
     ;;
   *)
-    echo "Usage: bash scripts/eval/relbench.sh [convert|eval|score|h5|tfm|pipeline|all]" >&2
+    echo "Usage: bash scripts/eval/relbench.sh [convert|eval|score|h5|tfm|pipeline|all] [config.yaml]" >&2
     exit 2
     ;;
 esac

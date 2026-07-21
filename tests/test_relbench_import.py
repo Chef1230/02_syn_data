@@ -257,6 +257,48 @@ class RelBenchImportTests(unittest.TestCase):
             )
             self.assertAlmostEqual(official.metrics["mean_score"], 1.6 / 3)
 
+    def test_pre_unix_epoch_timestamps_are_shifted_without_losing_order(self) -> None:
+        dataset, task = self._objects()
+        for frame in task.split_frames.values():
+            frame["timestamp"] = frame["timestamp"] - pd.DateOffset(years=70)
+        with tempfile.TemporaryDirectory() as directory:
+            result = convert_relbench_objects(
+                RelBenchImportConfig(
+                    dataset_name="rel-f1",
+                    task_name="driver-dnf",
+                    output_root=Path(directory),
+                    max_rows_per_task=5,
+                    query_rows_per_task=2,
+                    support_rows=3,
+                ),
+                dataset=dataset,
+                task=task,
+            )
+
+            metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+            self.assertLess(metadata["timestamp_origin_ns"], 0)
+            store = RoutingTaskStore(result.task_manifest, cache_size=1)
+            raw = store.load(store.references[0])
+            times = raw.database.table(
+                raw.task_artifact.task.plan.target_table_id
+            ).column(raw.task_artifact.task.plan.row_cutoff_time_column_id)
+            self.assertTrue(np.all(times >= 0))
+
+    def test_missing_task_timestamp_is_still_rejected(self) -> None:
+        dataset, task = self._objects()
+        task.split_frames["train"].loc[0, "timestamp"] = pd.NaT
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "timestamps cannot be missing"):
+                convert_relbench_objects(
+                    RelBenchImportConfig(
+                        dataset_name="rel-fake",
+                        task_name="missing-time",
+                        output_root=Path(directory),
+                    ),
+                    dataset=dataset,
+                    task=task,
+                )
+
     def test_rejects_task_types_that_need_non_scalar_targets(self) -> None:
         dataset, task = self._objects()
         task.task_type = SimpleNamespace(value="link_prediction")

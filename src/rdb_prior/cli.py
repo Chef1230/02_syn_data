@@ -818,7 +818,6 @@ def _run_router_eval(args: argparse.Namespace) -> int:
         logger=logger,
         log_every=1,
         enabled=args.progress,
-        overwrite=False,
         width=args.progress_width,
     )
     try:
@@ -876,7 +875,6 @@ def _run_relbench_import(args: argparse.Namespace) -> int:
         logger=logger,
         log_every=1,
         enabled=args.progress,
-        overwrite=False,
         width=args.progress_width,
     )
     try:

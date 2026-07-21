@@ -264,8 +264,13 @@ def convert_relbench_objects(
         )
 
     combined = _concat_split_frames(split_frames)
-    anchor_times = _timestamp_array(combined[time_column])
-    if np.any(anchor_times < 0):
+    timestamp_origin_ns = _timestamp_origin_ns(
+        database, anchor_series=combined[time_column]
+    )
+    anchor_times = _timestamp_array(
+        combined[time_column], origin_ns=timestamp_origin_ns
+    )
+    if np.any(anchor_times == -1):
         raise ValueError("RelBench task timestamps cannot be missing")
     labels = _label_array(
         combined[target_column],
@@ -317,6 +322,7 @@ def convert_relbench_objects(
         anchor_times=anchor_times,
         labels=labels,
         max_text_length=config.max_text_length,
+        timestamp_origin_ns=timestamp_origin_ns,
     )
     physical_tables = tuple(
         item.table for item in converted.tables
@@ -548,6 +554,7 @@ def convert_relbench_objects(
             "entity_column": entity_column,
             "time_column": time_column,
             "target_column": target_column,
+            "timestamp_origin_ns": timestamp_origin_ns,
         },
         database_count=1,
         entries=task_entries,
@@ -572,6 +579,7 @@ def convert_relbench_objects(
             "entity_column": entity_column,
             "time_column": time_column,
             "target_column": target_column,
+            "timestamp_origin_ns": timestamp_origin_ns,
             "sample_id": sample_id,
             "schema_id": schema_id,
             "instance_id": instance_id,
@@ -672,6 +680,7 @@ def _convert_database(
     anchor_times: np.ndarray,
     labels: np.ndarray,
     max_text_length: int,
+    timestamp_origin_ns: int,
 ) -> _ConvertedDatabase:
     original_names = tuple(sorted(database.table_dict))
     table_ids = {
@@ -807,7 +816,9 @@ def _convert_database(
             is_time = original_column == rel_table.time_col
             if is_time:
                 data_type = PhysicalDataType.TIMESTAMP
-                values = _timestamp_array(frame[original_column])
+                values = _timestamp_array(
+                    frame[original_column], origin_ns=timestamp_origin_ns
+                )
                 kind = ColumnKind.TIME
                 time_id = column_id
             else:
@@ -1169,12 +1180,46 @@ def _map_foreign_keys(values: Any, parent_values: Any) -> np.ndarray:
     return mapped.astype(np.int64, copy=False)
 
 
-def _timestamp_array(series: Any) -> np.ndarray:
+def _timestamp_origin_ns(database: Any, *, anchor_series: Any) -> int:
+    minimum = 0
+    maximum = 0
+    timestamp_series = [anchor_series]
+    for table in database.table_dict.values():
+        if table.time_col is not None and table.time_col in table.df.columns:
+            timestamp_series.append(table.df[table.time_col])
+    for series in timestamp_series:
+        raw, missing = _raw_timestamp_array(series)
+        valid = raw[~missing]
+        if len(valid):
+            minimum = min(minimum, int(np.min(valid)))
+            maximum = max(maximum, int(np.max(valid)))
+    origin = min(0, minimum)
+    if maximum - origin > np.iinfo(np.int64).max:
+        raise ValueError("RelBench timestamp range exceeds int64 capacity")
+    return origin
+
+
+def _raw_timestamp_array(series: Any) -> tuple[np.ndarray, np.ndarray]:
     import pandas as pd
 
     values = pd.to_datetime(series, errors="coerce", utc=True)
+    missing = np.asarray(pd.isna(values), dtype=np.bool_)
     result = values.astype("int64").to_numpy(dtype=np.int64, copy=True)
-    result[result == np.iinfo(np.int64).min] = -1
+    return result, missing
+
+
+def _timestamp_array(series: Any, *, origin_ns: int = 0) -> np.ndarray:
+    result, missing = _raw_timestamp_array(series)
+    valid = ~missing
+    if np.any(valid):
+        minimum = int(np.min(result[valid]))
+        maximum = int(np.max(result[valid]))
+        if minimum < origin_ns:
+            raise ValueError("timestamp origin is after a valid timestamp")
+        if maximum - origin_ns > np.iinfo(np.int64).max:
+            raise ValueError("timestamp range exceeds int64 capacity")
+        result[valid] -= np.int64(origin_ns)
+    result[missing] = -1
     return result
 
 
