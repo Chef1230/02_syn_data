@@ -39,9 +39,95 @@ from rdb_prior.task.artifacts import TaskArtifact, load_task_artifact
 from rdb_prior.task.model import TaskMechanism
 from rdb_prior.task.pipeline import TaskPipelineConfig, generate_tasks
 from rdb_prior.task.planner import TaskPlanner, TaskPlannerConfig
+from rdb_prior.task.view import build_task_view
 
 
 class RDBPFNExportTests(unittest.TestCase):
+    def test_conversion_filters_supervision_rows_hidden_by_task_view(self) -> None:
+        sample_id = "sample_000017"
+        runtime = RuntimeContext(42).for_sample(sample_id)
+        blueprint = BlueprintSampler().sample(sample_id, runtime)
+        schema = PhysicalSchemaCompiler().compile(
+            blueprint,
+            sample_id,
+            runtime,
+        )
+        instance_plan = InstancePlanner(
+            InstancePlannerConfig(
+                entity_rows_min=32,
+                entity_rows_max=40,
+                lookup_rows_min=3,
+                lookup_rows_max=5,
+                max_rows_per_table=128,
+            )
+        ).plan(
+            sample_id=sample_id,
+            schema=schema,
+            runtime=runtime.child("database-instance"),
+        )
+        database = DatabaseGenerator().generate(
+            schema=schema,
+            plan=instance_plan,
+        )
+        tasks = TaskPlanner(
+            TaskPlannerConfig(
+                tasks_per_database=2,
+                min_support_rows=8,
+                min_query_rows=4,
+                min_class_count_per_split=1,
+                max_attempts_per_database=256,
+            )
+        ).generate(
+            sample_id=sample_id,
+            schema=schema,
+            database=database,
+            runtime=runtime.child("task"),
+        )
+        task = next(
+            item
+            for item in tasks
+            if item.data.total_rows
+            > len(
+                build_task_view(
+                    schema,
+                    database,
+                    item.plan,
+                ).visible_rows(item.plan.target_table_id)
+            )
+        )
+        artifact = TaskArtifact(
+            sample_id=sample_id,
+            instance_artifact="unused",
+            schema_artifact="unused",
+            runtime=runtime.record(
+                project_version="test",
+                config_digest="test",
+            ),
+            task=task,
+            validation=None,  # type: ignore[arg-type]
+        )
+
+        dataset = RDBPFNConverter(min_validation_rows=2).convert(
+            task_artifact=artifact,
+            schema=schema,
+            database=database,
+        )
+
+        self.assertTrue(validate_rdbpfn_dataset(dataset).is_valid)
+        target = schema.table(task.plan.target_table_id)
+        key_name = target.primary_key.name
+        target_keys = set(dataset.tables[target.name][key_name].tolist())
+        self.assertLess(
+            sum(len(split[key_name]) for split in dataset.splits.values()),
+            task.data.total_rows,
+        )
+        for split in dataset.splits.values():
+            self.assertLessEqual(set(split[key_name].tolist()), target_keys)
+            self.assertEqual(
+                dataset.tables[target.name][key_name].dtype,
+                split[key_name].dtype,
+            )
+
     def test_pipeline_writes_loadable_dbb_dataset_without_target_leakage(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

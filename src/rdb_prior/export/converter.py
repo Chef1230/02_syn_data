@@ -116,6 +116,7 @@ class RDBPFNConverter:
             schema=schema,
             database=database,
             target_primary_key=target_primary_key,
+            visible_target_rows=view.visible_rows(target_table.table_id),
         )
         task_columns = self._task_column_metadata(
             task_artifact=task_artifact,
@@ -173,6 +174,8 @@ class RDBPFNConverter:
         visible_rows: np.ndarray,
     ) -> np.ndarray:
         raw = database.table(table_id).column(column.column_id)[visible_rows]
+        if column.kind is ColumnKind.PRIMARY_KEY:
+            return raw.copy()
         if foreign_key is not None:
             parent = schema.table(foreign_key.parent_table_id)
             parent_keys = database.table(parent.table_id).column(
@@ -225,11 +228,36 @@ class RDBPFNConverter:
         schema: PhysicalSchema,
         database: DatabaseInstance,
         target_primary_key: PhysicalColumn,
+        visible_target_rows: np.ndarray,
     ) -> dict[str, dict[str, np.ndarray]]:
         task = task_artifact.task
         plan = task.plan
+        target_table = schema.table(plan.target_table_id)
+        primary_keys = database.table(target_table.table_id).column(
+            target_primary_key.column_id
+        )
+        visible_mask = np.zeros(len(primary_keys), dtype=bool)
+        visible_mask[visible_target_rows] = True
+        support_visible = np.flatnonzero(
+            visible_mask[task.data.support_row_ids]
+        ).astype(np.int64)
+        query_visible = np.flatnonzero(
+            visible_mask[task.data.query_row_ids]
+        ).astype(np.int64)
+        if not len(support_visible):
+            raise ValueError(
+                "task has no visible support rows after applying observation rules"
+            )
+        if not len(query_visible):
+            raise ValueError(
+                "task has no visible query rows after applying observation rules"
+            )
+        support_rows = task.data.support_row_ids[support_visible]
+        support_labels = task.data.support_labels[support_visible]
+        query_rows = task.data.query_row_ids[query_visible]
+        query_labels = task.data.query_labels[query_visible]
         support_train, support_validation = self._split_support(
-            labels=task.data.support_labels,
+            labels=support_labels,
             prediction_type=plan.prediction_type,
             temporal=plan.split_strategy == "temporal_rows",
             seed=plan.seed,
@@ -237,22 +265,18 @@ class RDBPFNConverter:
         split_indices = {
             "train": support_train,
             "validation": support_validation,
-            "test": np.arange(len(task.data.query_row_ids), dtype=np.int64),
+            "test": np.arange(len(query_rows), dtype=np.int64),
         }
         row_sources = {
-            "train": task.data.support_row_ids,
-            "validation": task.data.support_row_ids,
-            "test": task.data.query_row_ids,
+            "train": support_rows,
+            "validation": support_rows,
+            "test": query_rows,
         }
         label_sources = {
-            "train": task.data.support_labels,
-            "validation": task.data.support_labels,
-            "test": task.data.query_labels,
+            "train": support_labels,
+            "validation": support_labels,
+            "test": query_labels,
         }
-        target_table = schema.table(plan.target_table_id)
-        primary_keys = database.table(target_table.table_id).column(
-            target_primary_key.column_id
-        )
         target_time_column = next(
             (
                 column
