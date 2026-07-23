@@ -1,4 +1,11 @@
-"""Classification task mechanisms with exact route provenance."""
+"""Classification task mechanisms with exact route provenance.
+
+Every mechanism now explicitly samples three things from its target table
+node: a primary key (row_id), a target column, and — when the target table
+carries a TIME column — a time column.  Synthetic-label mechanisms use the
+well-known sentinel ``__label__`` as their ``target_column_id`` so that the
+export layer can always emit ``row_id | label | cutoff_time``.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +29,42 @@ from rdb_prior.task.model import (
     TaskPlan,
 )
 
+# Sentinel column id used by mechanisms whose label is computed rather than
+# sourced from an existing feature column.
+_SYNTHETIC_TARGET = "__label__"
+
+
+# ---------------------------------------------------------------------------
+# Unified target-table sampling
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TargetSample:
+    """The three columns every task samples from its target table node."""
+
+    table_id: str
+    primary_key_column_id: str
+    target_column_id: str
+    time_column_id: str | None
+
+
+def _sample_target_columns(
+    schema: PhysicalSchema,
+    target_table_id: str,
+    *,
+    target_column_id: str,
+    time_column_id: str | None = None,
+) -> TargetSample:
+    """Bundle primary key, target column, and optional time column."""
+    target_table = schema.table(target_table_id)
+    return TargetSample(
+        table_id=target_table_id,
+        primary_key_column_id=target_table.primary_key.column_id,
+        target_column_id=target_column_id,
+        time_column_id=time_column_id,
+    )
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RelationAttributeCandidate:
@@ -40,6 +83,7 @@ class FutureEventCandidate:
     entity_table_id: str
     event_table_id: str
     time_column_id: str
+    target_column_id: str = _SYNTHETIC_TARGET
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -60,6 +104,7 @@ class TemporalAggregateCandidate:
     time_column_id: str
     operator: AggregateOperator
     source_column_id: str | None
+    target_column_id: str = _SYNTHETIC_TARGET
 
 
 def relation_attribute_candidates(
@@ -119,6 +164,7 @@ def future_event_candidates(schema: PhysicalSchema) -> tuple[FutureEventCandidat
             parent.role is TableRole.ENTITY
             and child.role is TableRole.EVENT
             and time_column is not None
+            and _has_incoming_fk(schema, parent.table_id)
         ):
             result.append(
                 FutureEventCandidate(
@@ -167,6 +213,8 @@ def temporal_aggregate_candidates(
     result: list[TemporalAggregateCandidate] = []
     for target in schema.tables:
         if target.role not in {TableRole.ENTITY, TableRole.EVENT}:
+            continue
+        if not _has_incoming_fk(schema, target.table_id):
             continue
         for path, endpoint_id in _enumerate_paths(schema, target.table_id, max_depth=2):
             endpoint = schema.table(endpoint_id)
@@ -225,11 +273,30 @@ def build_relation_attribute_task(
     else:
         requested_rate = float(rng.uniform(positive_rate_min, positive_rate_max))
         labels, threshold = _threshold_labels(scores, requested_rate)
-    split = _stratified_split(
-        labels, rng, support_fraction=support_fraction,
-        min_support_rows=min_support_rows, min_query_rows=min_query_rows,
-        min_class_count=min_class_count_per_split,
-    )
+    # When the target table carries a TIME column, use temporal ordering for
+    # the support/query split so that the export layer can emit cutoff_time.
+    target_table = schema.table(candidate.table_id)
+    time_col = _time_column(target_table)
+    if time_col is not None:
+        times = database.table(candidate.table_id).column(time_col)
+        ordered = np.argsort(times, kind="stable").astype(np.int64)
+        split = _temporal_split(
+            labels, ordered, rng, support_fraction=support_fraction,
+            min_support_rows=min_support_rows, min_query_rows=min_query_rows,
+            min_class_count=min_class_count_per_split,
+        )
+        split_strategy = "temporal_rows"
+        visibility_cutoff = int(times[ordered[-1]]) if len(ordered) else 0
+        obs_rules = _observation_rules(schema, visibility_cutoff)
+    else:
+        split = _stratified_split(
+            labels, rng, support_fraction=support_fraction,
+            min_support_rows=min_support_rows, min_query_rows=min_query_rows,
+            min_class_count=min_class_count_per_split,
+        )
+        split_strategy = "stratified_rows"
+        visibility_cutoff = None
+        obs_rules = ()
     if split is None:
         return None
     support, query = split
@@ -241,8 +308,11 @@ def build_relation_attribute_task(
         source_table_id=candidate.source_table_id,
         target_column_id=candidate.column_id,
         source_column_id=candidate.source_column_id,
-        split_strategy="stratified_rows", seed=seed,
+        time_column_id=time_col,
+        cutoff_time=visibility_cutoff,
+        split_strategy=split_strategy, seed=seed,
         masked_column_ids=(candidate.column_id,),
+        observation_rules=obs_rules,
         route_supervision=_schema_route_labels(
             schema, target_table_id=candidate.table_id,
             required_paths=(candidate.required_path,),
@@ -305,10 +375,12 @@ def build_future_event_existence_task(
         prediction_type=PredictionType.CLASSIFICATION,
         target_table_id=candidate.entity_table_id,
         source_table_id=candidate.event_table_id,
+        target_column_id=candidate.target_column_id,
         foreign_key_id=candidate.foreign_key_id,
         time_column_id=candidate.time_column_id,
         cutoff_time=cutoff, horizon_end_time=horizon,
         split_strategy="stratified_entities", seed=seed,
+        masked_column_ids=(candidate.target_column_id,),
         observation_rules=_observation_rules(schema, cutoff),
         route_supervision=_schema_route_labels(
             schema, target_table_id=candidate.entity_table_id,
@@ -415,11 +487,13 @@ def build_temporal_relational_aggregate_task(
         prediction_type=PredictionType.CLASSIFICATION,
         target_table_id=candidate.target_table_id,
         source_table_id=candidate.source_table_id,
+        target_column_id=candidate.target_column_id,
         source_column_id=candidate.source_column_id,
         time_column_id=candidate.time_column_id,
         cutoff_time=cutoff, horizon_end_time=horizon,
         row_cutoff_time_column_id=row_cutoff_column,
         split_strategy="stratified_rows", seed=seed,
+        masked_column_ids=(candidate.target_column_id,),
         observation_rules=_observation_rules(schema, visibility_cutoff),
         route_supervision=_schema_route_labels(
             schema, target_table_id=candidate.target_table_id,
@@ -682,6 +756,13 @@ def _observation_rules(schema: PhysicalSchema, cutoff: int) -> tuple[Observation
     )
 
 
+def _has_incoming_fk(schema: PhysicalSchema, table_id: str) -> bool:
+    """Return True when *table_id* has at least one incoming FK edge."""
+    return any(
+        fk.child_table_id == table_id for fk in schema.foreign_keys
+    )
+
+
 def _foreign_key(schema: PhysicalSchema, foreign_key_id: str) -> PhysicalForeignKey:
     return next(fk for fk in schema.foreign_keys if fk.foreign_key_id == foreign_key_id)
 
@@ -728,11 +809,39 @@ def _schema_route_labels(
     )
 
 
+def _temporal_split(
+    labels: np.ndarray,
+    ordered: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    support_fraction: float,
+    min_support_rows: int,
+    min_query_rows: int,
+    min_class_count: int,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Support/query split respecting temporal order for cutoff_time export."""
+    groups = [np.flatnonzero(labels == value).astype(np.int64) for value in np.unique(labels)]
+    if len(groups) < 2 or any(len(group) < 2 * min_class_count for group in groups):
+        return None
+    support_count = max(min_support_rows, round(len(ordered) * support_fraction))
+    support_count = min(support_count, len(ordered) - min_query_rows)
+    if support_count < min_support_rows:
+        return None
+    support = ordered[:support_count].copy()
+    query = ordered[support_count:].copy()
+    rng.shuffle(support)
+    rng.shuffle(query)
+    if len(query) < min_query_rows:
+        return None
+    return support, query
+
+
 def _rng(seed: int) -> np.random.Generator:
     return np.random.Generator(np.random.PCG64DXSM(seed))
 
 
 __all__ = [
+    "TargetSample",
     "RelationAttributeCandidate", "FutureEventCandidate",
     "FutureEventAttributeCandidate", "TemporalAggregateCandidate",
     "relation_attribute_candidates", "future_event_candidates",

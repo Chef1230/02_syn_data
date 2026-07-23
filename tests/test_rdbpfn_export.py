@@ -46,7 +46,9 @@ class RDBPFNExportTests(unittest.TestCase):
     def test_conversion_filters_supervision_rows_hidden_by_task_view(self) -> None:
         sample_id = "sample_000017"
         runtime = RuntimeContext(42).for_sample(sample_id)
-        blueprint = BlueprintSampler().sample(sample_id, runtime)
+        blueprint = BlueprintSampler(
+            BlueprintSamplerConfig(min_tables=5, max_tables=8)
+        ).sample(sample_id, runtime)
         schema = PhysicalSchemaCompiler().compile(
             blueprint,
             sample_id,
@@ -211,11 +213,11 @@ class RDBPFNExportTests(unittest.TestCase):
 
     def test_future_event_conversion_applies_common_cutoff(self) -> None:
         converter = RDBPFNConverter(min_validation_rows=2)
-        for index in range(30):
+        for index in range(50):
             sample_id = f"export_future_{index}"
             runtime = RuntimeContext(404).for_sample(sample_id)
             blueprint = BlueprintSampler(
-                BlueprintSamplerConfig(min_tables=4, max_tables=4)
+                BlueprintSamplerConfig(min_tables=5, max_tables=7)
             ).sample(sample_id, runtime)
             schema = PhysicalSchemaCompiler().compile(
                 blueprint,

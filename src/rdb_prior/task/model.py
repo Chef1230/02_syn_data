@@ -255,15 +255,8 @@ class TaskPlan:
                 raise ValueError("relation attribute task requires target_column_id")
             if self.target_column_id not in self.masked_column_ids:
                 raise ValueError("relation attribute target must be masked")
-            if any(
-                value is not None
-                for value in (
-                    self.foreign_key_id,
-                    self.cutoff_time,
-                    self.horizon_end_time,
-                )
-            ):
-                raise ValueError("relation attribute task has temporal FK fields")
+            # Temporal FK fields are allowed — when the target table carries a
+            # TIME column the mechanism sets cutoff_time and observation_rules.
         elif self.mechanism is TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE:
             if self.prediction_type is not PredictionType.CLASSIFICATION:
                 raise ValueError("future event existence must be classification")
@@ -274,14 +267,20 @@ class TaskPlan:
                 self.horizon_end_time,
             ):
                 raise ValueError("future event existence requires FK and horizon")
-            if self.target_column_id is not None or self.masked_column_ids:
-                raise ValueError("future event existence uses a synthetic label")
+            if self.target_column_id is None:
+                raise ValueError("future event existence requires target_column_id")
+            if self.target_column_id not in self.masked_column_ids:
+                raise ValueError("future event existence target must be masked")
         elif self.mechanism is TaskMechanism.FUTURE_EVENT_ATTRIBUTE_CONDITION:
             if self.target_column_id is None or self.row_cutoff_time_column_id is None:
                 raise ValueError("future event attribute requires target and cutoff columns")
             if self.target_column_id not in self.masked_column_ids:
                 raise ValueError("future event attribute target must be masked")
         elif self.mechanism is TaskMechanism.TEMPORAL_RELATIONAL_AGGREGATE:
+            if self.target_column_id is None:
+                raise ValueError("temporal aggregate requires target_column_id")
+            if self.target_column_id not in self.masked_column_ids:
+                raise ValueError("temporal aggregate target must be masked")
             if self.aggregate_operator is None or self.time_column_id is None:
                 raise ValueError("temporal aggregate requires operator and time column")
             if not any(

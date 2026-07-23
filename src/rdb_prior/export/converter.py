@@ -306,6 +306,11 @@ class RDBPFNConverter:
             if plan.mechanism is TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE:
                 cutoff = np.full(len(rows), int(plan.cutoff_time), dtype=np.int64)
                 columns[_CUTOFF_COLUMN] = _seconds_to_datetime(cutoff)
+            elif plan.cutoff_time is not None and target_times is not None:
+                columns[_CUTOFF_COLUMN] = _seconds_to_datetime(target_times[rows])
+            elif plan.cutoff_time is not None:
+                cutoff = np.full(len(rows), int(plan.cutoff_time), dtype=np.int64)
+                columns[_CUTOFF_COLUMN] = _seconds_to_datetime(cutoff)
             elif target_times is not None:
                 columns[_CUTOFF_COLUMN] = _seconds_to_datetime(target_times[rows])
             result[split_name] = columns

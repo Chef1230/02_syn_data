@@ -37,10 +37,10 @@ from rdb_prior.task.view import build_task_view
 
 
 class TaskGenerationTests(unittest.TestCase):
-    def _database(self, sample_id: str):
+    def _database(self, sample_id: str, *, min_tables: int = 4, max_tables: int = 4):
         runtime = RuntimeContext(303).for_sample(sample_id)
         blueprint = BlueprintSampler(
-            BlueprintSamplerConfig(min_tables=4, max_tables=4)
+            BlueprintSamplerConfig(min_tables=min_tables, max_tables=max_tables)
         ).sample(sample_id, runtime)
         schema = PhysicalSchemaCompiler().compile(blueprint, sample_id, runtime)
         plan = InstancePlanner(
@@ -104,12 +104,14 @@ class TaskGenerationTests(unittest.TestCase):
                 min_support_rows=8,
                 min_query_rows=4,
                 min_class_count_per_split=1,
-                max_attempts_per_database=256,
+                max_attempts_per_database=512,
             )
         )
-        for index in range(20):
+        for index in range(40):
             sample_id = f"future_task_{index}"
-            runtime, schema, database = self._database(sample_id)
+            runtime, schema, database = self._database(
+                sample_id, min_tables=5, max_tables=7
+            )
             try:
                 tasks = planner.generate(
                     sample_id=sample_id,
@@ -213,7 +215,7 @@ class TaskGenerationTests(unittest.TestCase):
         sample_id = "mechanism_route_audit"
         runtime = RuntimeContext(991).for_sample(sample_id)
         blueprint = BlueprintSampler(
-            BlueprintSamplerConfig(min_tables=4, max_tables=6)
+            BlueprintSamplerConfig(min_tables=6, max_tables=8)
         ).sample(sample_id, runtime)
         schema = PhysicalSchemaCompiler().compile(
             blueprint, sample_id, runtime
