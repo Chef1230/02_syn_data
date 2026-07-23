@@ -104,13 +104,26 @@ instance:
   degree_strength: 0.8
 
   scm_weights:
-    linear: 0.35
-    cam: 0.35
-    mlp: 0.30
+    exogenous: 0.30
+    linear: 0.40
+    cam: 0.20
+    mlp: 0.10
   feature_missing_rate_min: 0.02
   feature_missing_rate_max: 0.15
-  feature_noise_scale_min: 0.08
-  feature_noise_scale_max: 0.25
+  # RDB-PFN-style hierarchical SCM prior. A database first samples meta
+  # hyperparameters; its tables then sample conditional scale/noise values.
+  feature_noise_scale_min: 0.0001
+  feature_noise_scale_max: 0.3
+  scm_signal_scale_min: 0.01
+  scm_signal_scale_max: 10.0
+  scm_meta_relative_std_min: 0.01
+  scm_meta_relative_std_max: 1.0
+  scm_activation_scale_min: 0.1
+  scm_activation_scale_max: 100.0
+  scm_output_scale_log_std: 1.4
+  scm_long_tail_probability: 0.5
+  scm_long_tail_alpha_min: 1.1
+  scm_long_tail_alpha_max: 2.0
   categorical_cardinality_min: 3
   categorical_cardinality_max: 12
   time_scale_seconds_min: 300.0
@@ -131,8 +144,10 @@ instance_generation:
 task:
   tasks_per_database: 2
   mechanism_weights:
-    relation_attribute: 0.5
-    future_event_existence: 0.5
+    relation_attribute: 0.35
+    entity_future_event_existence: 0.25
+    future_event_attribute_condition: 0.20
+    temporal_relational_aggregate: 0.20
 
   support_fraction: 0.70
   min_support_rows: 32
@@ -144,6 +159,8 @@ task:
   cutoff_quantile_max: 0.70
   horizon_fraction_min: 0.12
   horizon_fraction_max: 0.30
+  positive_rate_min: 0.20
+  positive_rate_max: 0.80
   max_attempts_per_database: 128
   require_full_task_count: true
 

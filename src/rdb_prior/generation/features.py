@@ -53,6 +53,20 @@ def generate_table_features(
             context,
             rng,
             noise_scale=table_plan.parameter_map["noise_scale"],
+            signal_scale=table_plan.parameter_map["signal_scale"],
+            activation_scale=table_plan.parameter_map["activation_scale"],
+            output_scale=table_plan.parameter_map["output_scale"],
+            long_tail_enabled=bool(
+                table_plan.parameter_map["long_tail_enabled"]
+            ),
+            long_tail_alpha=table_plan.parameter_map["long_tail_alpha"],
+            mlp_depth=int(table_plan.parameter_map.get("mlp_depth", 1)),
+            mlp_hidden_factor=float(
+                table_plan.parameter_map.get("mlp_hidden_factor", 2.0)
+            ),
+            mlp_dropout_rate=float(
+                table_plan.parameter_map.get("mlp_dropout_rate", 0.0)
+            ),
         )
         encoded = _encode_signal(
             signal,

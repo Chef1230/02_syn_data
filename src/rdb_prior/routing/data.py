@@ -905,16 +905,9 @@ def _route_supervision(
 ) -> tuple[np.ndarray, np.ndarray]:
     plan = raw.task_artifact.task.plan
     roles = {label.foreign_key_ids: label.role for label in plan.route_supervision}
-    if not roles and plan.mechanism is TaskMechanism.FUTURE_EVENT_EXISTENCE:
+    if not roles and plan.mechanism is TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE:
         if plan.foreign_key_id is not None:
             roles[(plan.foreign_key_id,)] = RouteRole.REQUIRED
-    if not roles and plan.mechanism is TaskMechanism.RELATION_ATTRIBUTE:
-        for foreign_key in raw.schema.foreign_keys:
-            if plan.target_table_id in {
-                foreign_key.parent_table_id,
-                foreign_key.child_table_id,
-            }:
-                roles[(foreign_key.foreign_key_id,)] = RouteRole.OPTIONAL
     target_map = {
         RouteRole.REQUIRED: 1.0,
         RouteRole.OPTIONAL: 0.5,

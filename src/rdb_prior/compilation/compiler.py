@@ -419,6 +419,12 @@ class PhysicalSchemaCompiler:
                     False,
                     False,
                 ),
+                (
+                    PhysicalDataType.TIMESTAMP,
+                    ColumnKind.TIME,
+                    False,
+                    False,
+                ),
             )
         else:
             specifications = ()

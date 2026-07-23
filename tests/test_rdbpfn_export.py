@@ -157,7 +157,7 @@ class RDBPFNExportTests(unittest.TestCase):
                 TaskPlannerConfig(
                     tasks_per_database=1,
                     mechanism_weights=(
-                        (TaskMechanism.FUTURE_EVENT_EXISTENCE, 1.0),
+                        (TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE, 1.0),
                     ),
                     min_support_rows=8,
                     min_query_rows=4,

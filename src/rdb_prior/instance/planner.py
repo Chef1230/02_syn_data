@@ -11,17 +11,31 @@ from rdb_prior.instance.plan import (
     InstancePlan,
     PopulationPlan,
     RelationMechanismPlan,
+    RootCauseFamily,
     TableMechanismPlan,
     TemporalFamily,
+)
+from rdb_prior.instance.scm_prior import (
+    sample_scm_meta_parameters,
+    sample_table_scm_parameters,
 )
 from rdb_prior.runtime import RuntimeContext
 from rdb_prior.schema.spec import Optionality, TableRole
 
 
 _DEFAULT_SCM_WEIGHTS = (
-    (FeatureSCMFamily.LINEAR, 0.35),
-    (FeatureSCMFamily.CAM, 0.35),
-    (FeatureSCMFamily.MLP, 0.30),
+    (FeatureSCMFamily.EXOGENOUS, 0.30),
+    (FeatureSCMFamily.LINEAR, 0.40),
+    (FeatureSCMFamily.CAM, 0.20),
+    (FeatureSCMFamily.MLP, 0.10),
+)
+
+_DEFAULT_ROOT_CAUSE_WEIGHTS = (
+    (RootCauseFamily.STANDARD_NORMAL, 0.30),
+    (RootCauseFamily.LINEAR, 0.20),
+    (RootCauseFamily.NONLINEAR, 0.20),
+    (RootCauseFamily.LOGNORMAL, 0.15),
+    (RootCauseFamily.GAUSSIAN_MIXTURE, 0.15),
 )
 
 
@@ -47,8 +61,18 @@ class InstancePlannerConfig:
     degree_strength: float = 0.8
     feature_missing_rate_min: float = 0.02
     feature_missing_rate_max: float = 0.15
-    feature_noise_scale_min: float = 0.08
-    feature_noise_scale_max: float = 0.25
+    feature_noise_scale_min: float = 0.0001
+    feature_noise_scale_max: float = 0.3
+    scm_signal_scale_min: float = 0.01
+    scm_signal_scale_max: float = 10.0
+    scm_meta_relative_std_min: float = 0.01
+    scm_meta_relative_std_max: float = 1.0
+    scm_activation_scale_min: float = 0.1
+    scm_activation_scale_max: float = 100.0
+    scm_output_scale_log_std: float = 1.4
+    scm_long_tail_probability: float = 0.5
+    scm_long_tail_alpha_min: float = 1.1
+    scm_long_tail_alpha_max: float = 2.0
     categorical_cardinality_min: int = 3
     categorical_cardinality_max: int = 12
     time_scale_seconds_min: float = 300.0
@@ -56,6 +80,20 @@ class InstancePlannerConfig:
     scm_weights: tuple[tuple[FeatureSCMFamily, float], ...] = (
         _DEFAULT_SCM_WEIGHTS
     )
+    # Root-cause latent distribution prior — each table draws one family
+    # that controls the shape of its exogenous latent variables.
+    root_cause_weights: tuple[tuple[RootCauseFamily, float], ...] = (
+        _DEFAULT_ROOT_CAUSE_WEIGHTS
+    )
+    # MLP structural prior ranges — sampled once per database, each MLP
+    # table then draws its own depth / hidden factor / dropout realisation.
+    mlp_depth_min: int = 1
+    mlp_depth_max: int = 4
+    mlp_hidden_factor_min: float = 0.5
+    mlp_hidden_factor_max: float = 4.0
+    mlp_dropout_probability: float = 0.6
+    mlp_dropout_rate_min: float = 0.05
+    mlp_dropout_rate_max: float = 0.4
 
     def __post_init__(self) -> None:
         _integer_range(
@@ -109,6 +147,46 @@ class InstancePlannerConfig:
             self.feature_noise_scale_min,
             self.feature_noise_scale_max,
         )
+        _positive_range(
+            "SCM signal scale",
+            self.scm_signal_scale_min,
+            self.scm_signal_scale_max,
+        )
+        _positive_range(
+            "SCM meta relative std",
+            self.scm_meta_relative_std_min,
+            self.scm_meta_relative_std_max,
+        )
+        _positive_range(
+            "SCM activation scale",
+            self.scm_activation_scale_min,
+            self.scm_activation_scale_max,
+        )
+        if self.scm_output_scale_log_std <= 0:
+            raise ValueError("scm_output_scale_log_std must be positive")
+        if not 0 <= self.scm_long_tail_probability <= 1:
+            raise ValueError("scm_long_tail_probability must be in [0, 1]")
+        _positive_range(
+            "SCM long-tail alpha",
+            self.scm_long_tail_alpha_min,
+            self.scm_long_tail_alpha_max,
+        )
+        if self.scm_long_tail_alpha_min <= 1:
+            raise ValueError("scm_long_tail_alpha_min must be greater than 1")
+        _integer_range("MLP depth", self.mlp_depth_min, self.mlp_depth_max)
+        if self.mlp_depth_min < 1:
+            raise ValueError("mlp_depth_min must be at least 1")
+        _positive_range(
+            "MLP hidden factor",
+            self.mlp_hidden_factor_min,
+            self.mlp_hidden_factor_max,
+        )
+        if not 0 <= self.mlp_dropout_probability <= 1:
+            raise ValueError("mlp_dropout_probability must be in [0, 1]")
+        if not 0 <= self.mlp_dropout_rate_min <= self.mlp_dropout_rate_max < 1:
+            raise ValueError(
+                "mlp_dropout_rate must satisfy 0 <= min <= max < 1"
+            )
         _integer_range(
             "categorical cardinality",
             self.categorical_cardinality_min,
@@ -126,13 +204,26 @@ class InstancePlannerConfig:
             raise ValueError("scm_weights families must be unique")
         for family, weight in self.scm_weights:
             if family not in {
+                FeatureSCMFamily.EXOGENOUS,
                 FeatureSCMFamily.LINEAR,
                 FeatureSCMFamily.CAM,
                 FeatureSCMFamily.MLP,
             }:
-                raise ValueError("scm_weights supports linear, cam and mlp")
+                raise ValueError(
+                    "scm_weights supports exogenous, linear, cam and mlp"
+                )
             if weight <= 0:
                 raise ValueError("scm weights must be positive")
+        if not isinstance(self.root_cause_weights, tuple) or not self.root_cause_weights:
+            raise ValueError("root_cause_weights must be a non-empty tuple")
+        rc_families = tuple(family for family, _w in self.root_cause_weights)
+        if len(set(rc_families)) != len(rc_families):
+            raise ValueError("root_cause_weights families must be unique")
+        for family, weight in self.root_cause_weights:
+            if not isinstance(family, RootCauseFamily):
+                raise TypeError("root_cause_weights keys must be RootCauseFamily")
+            if weight <= 0:
+                raise ValueError("root_cause weights must be positive")
 
 
 class InstancePlanner:
@@ -166,6 +257,28 @@ class InstancePlanner:
             )
             for table in schema.tables
         }
+        meta = sample_scm_meta_parameters(
+            runtime.numpy_rng("instance", "scm-meta"),
+            signal_mean_min=self.config.scm_signal_scale_min,
+            signal_mean_max=self.config.scm_signal_scale_max,
+            noise_mean_min=self.config.feature_noise_scale_min,
+            noise_mean_max=self.config.feature_noise_scale_max,
+            relative_std_min=self.config.scm_meta_relative_std_min,
+            relative_std_max=self.config.scm_meta_relative_std_max,
+            activation_scale_min=self.config.scm_activation_scale_min,
+            activation_scale_max=self.config.scm_activation_scale_max,
+            output_log_std=self.config.scm_output_scale_log_std,
+            long_tail_probability=self.config.scm_long_tail_probability,
+            long_tail_alpha_min=self.config.scm_long_tail_alpha_min,
+            long_tail_alpha_max=self.config.scm_long_tail_alpha_max,
+            mlp_depth_min=self.config.mlp_depth_min,
+            mlp_depth_max=self.config.mlp_depth_max,
+            mlp_hidden_factor_min=self.config.mlp_hidden_factor_min,
+            mlp_hidden_factor_max=self.config.mlp_hidden_factor_max,
+            mlp_dropout_probability=self.config.mlp_dropout_probability,
+            mlp_dropout_rate_min=self.config.mlp_dropout_rate_min,
+            mlp_dropout_rate_max=self.config.mlp_dropout_rate_max,
+        )
         table_plans: dict[str, TableMechanismPlan] = {}
         for table_id in order:
             table = schema.table(table_id)
@@ -182,8 +295,15 @@ class InstancePlanner:
                 schema,
             )
             family = self._feature_family(table.role, runtime, table_id)
+            root_cause = self._root_cause_family(table.role, runtime, table_id)
             parameter_rng = runtime.numpy_rng(
                 "instance", "table-parameters", table_id
+            )
+            scm_parameters = sample_table_scm_parameters(
+                parameter_rng,
+                meta,
+                activation_scale_min=self.config.scm_activation_scale_min,
+                activation_scale_max=self.config.scm_activation_scale_max,
             )
             table_plans[table_id] = TableMechanismPlan(
                 table_id=table_id,
@@ -195,6 +315,7 @@ class InstancePlanner:
                 ),
                 latent_dimension=self.config.latent_dimension,
                 feature_family=family,
+                root_cause_family=root_cause,
                 temporal_family=temporal,
                 latent_seed=runtime.seed("instance", "latent", table_id),
                 feature_seed=runtime.seed("instance", "feature", table_id),
@@ -219,15 +340,6 @@ class InstancePlanner:
                         ),
                     ),
                     (
-                        "noise_scale",
-                        float(
-                            parameter_rng.uniform(
-                                self.config.feature_noise_scale_min,
-                                self.config.feature_noise_scale_max,
-                            )
-                        ),
-                    ),
-                    (
                         "time_scale_seconds",
                         float(
                             parameter_rng.uniform(
@@ -236,7 +348,8 @@ class InstancePlanner:
                             )
                         ),
                     ),
-                ),
+                )
+                + scm_parameters,
             )
 
         relations = self._relation_plans(schema, runtime)
@@ -249,6 +362,7 @@ class InstancePlanner:
             generation_order=order,
             tables=tuple(table_plans[table_id] for table_id in order),
             relations=relations,
+            parameters=meta.parameters,
         )
 
     def _row_count(
@@ -318,6 +432,19 @@ class InstancePlanner:
             return FeatureSCMFamily.EXOGENOUS
         rng = runtime.python_rng("instance", "scm-family", table_id)
         families, weights = zip(*self.config.scm_weights)
+        return rng.choices(families, weights=weights, k=1)[0]
+
+    def _root_cause_family(
+        self,
+        role: TableRole,
+        runtime: RuntimeContext,
+        table_id: str,
+    ) -> RootCauseFamily:
+        """Sample the exogenous latent distribution family for one table."""
+        if role is TableRole.LOOKUP:
+            return RootCauseFamily.STANDARD_NORMAL
+        rng = runtime.python_rng("instance", "root-cause", table_id)
+        families, weights = zip(*self.config.root_cause_weights)
         return rng.choices(families, weights=weights, k=1)[0]
 
     @staticmethod

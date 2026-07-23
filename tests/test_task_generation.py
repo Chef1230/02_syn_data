@@ -28,8 +28,8 @@ from rdb_prior.pipeline import (
 from rdb_prior.runtime import RuntimeContext
 from rdb_prior.schema.sampler import BlueprintSampler, BlueprintSamplerConfig
 from rdb_prior.task.artifacts import load_task_artifact
-from rdb_prior.task.mechanisms import future_event_labels
-from rdb_prior.task.model import TaskMechanism, TaskPlan
+from rdb_prior.task.mechanisms import future_event_labels, mechanism_labels
+from rdb_prior.task.model import RouteRole, TaskMechanism, TaskPlan
 from rdb_prior.task.pipeline import TaskPipelineConfig, generate_tasks
 from rdb_prior.task.planner import TaskPlanner, TaskPlannerConfig
 from rdb_prior.task.validation import validate_task
@@ -99,7 +99,7 @@ class TaskGenerationTests(unittest.TestCase):
             TaskPlannerConfig(
                 tasks_per_database=1,
                 mechanism_weights=(
-                    (TaskMechanism.FUTURE_EVENT_EXISTENCE, 1.0),
+                    (TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE, 1.0),
                 ),
                 min_support_rows=8,
                 min_query_rows=4,
@@ -208,6 +208,65 @@ class TaskGenerationTests(unittest.TestCase):
                     instance.database.instance_id,
                     artifact.task.plan.instance_id,
                 )
+
+    def test_all_mechanisms_emit_recomputable_exact_required_paths(self) -> None:
+        sample_id = "mechanism_route_audit"
+        runtime = RuntimeContext(991).for_sample(sample_id)
+        blueprint = BlueprintSampler(
+            BlueprintSamplerConfig(min_tables=4, max_tables=6)
+        ).sample(sample_id, runtime)
+        schema = PhysicalSchemaCompiler().compile(
+            blueprint, sample_id, runtime
+        )
+        instance_plan = InstancePlanner(
+            InstancePlannerConfig(
+                entity_rows_min=32,
+                entity_rows_max=48,
+                max_rows_per_table=160,
+            )
+        ).plan(
+            sample_id=sample_id,
+            schema=schema,
+            runtime=runtime.child("database-instance"),
+        )
+        database = DatabaseGenerator().generate(
+            schema=schema,
+            plan=instance_plan,
+        )
+
+        for mechanism in TaskMechanism:
+            tasks = TaskPlanner(
+                TaskPlannerConfig(
+                    tasks_per_database=1,
+                    mechanism_weights=((mechanism, 1.0),),
+                    min_support_rows=8,
+                    min_query_rows=4,
+                    min_class_count_per_split=1,
+                    max_attempts_per_database=512,
+                )
+            ).generate(
+                sample_id=sample_id,
+                schema=schema,
+                database=database,
+                runtime=runtime.child("task", mechanism.value),
+            )
+            task = tasks[0]
+            required = [
+                label
+                for label in task.plan.route_supervision
+                if label.role is RouteRole.REQUIRED
+            ]
+            self.assertTrue(required, mechanism.value)
+            expected = mechanism_labels(schema, database, task.plan)
+            np.testing.assert_array_equal(
+                task.data.support_labels,
+                expected[task.data.support_row_ids],
+            )
+            np.testing.assert_array_equal(
+                task.data.query_labels,
+                expected[task.data.query_row_ids],
+            )
+            self.assertTrue(validate_task(schema, database, task).is_valid)
 
 
 if __name__ == "__main__":

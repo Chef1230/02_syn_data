@@ -10,12 +10,14 @@ import numpy as np
 from rdb_prior.compilation.model import ColumnKind, PhysicalSchema
 from rdb_prior.generation.model import DatabaseInstance
 from rdb_prior.schema.spec import TableRole
-from rdb_prior.task.mechanisms import future_event_labels
+from rdb_prior.task.mechanisms import mechanism_labels
 from rdb_prior.task.model import (
     PlannedTask,
     PredictionType,
     RoutePathLabel,
+    RouteRole,
     TaskMechanism,
+    TaskPlan,
 )
 
 
@@ -114,29 +116,27 @@ def validate_task(
                 )
 
     issues.extend(_validate_route_supervision(schema, plan.target_table_id, plan.route_supervision))
+    if not (
+        plan.mechanism is TaskMechanism.RELATION_ATTRIBUTE
+        and plan.source_column_id is None
+    ):
+        issues.extend(_validate_required_route_endpoint(schema, plan))
 
+    issues.extend(_validate_mechanism_labels(schema, database, task))
     if plan.mechanism is TaskMechanism.RELATION_ATTRIBUTE:
-        issues.extend(_validate_relation_attribute(schema, database, task))
-    elif plan.mechanism is TaskMechanism.FUTURE_EVENT_EXISTENCE:
-        issues.extend(_validate_future_event(schema, database, task))
-    else:  # pragma: no cover - enum protects construction.
-        issues.append(_issue("unknown_mechanism", "unsupported task mechanism"))
+        issues.extend(_validate_relation_attribute(schema, task))
+    if plan.mechanism is TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE:
+        issues.extend(_validate_future_visibility(schema, task))
     return TaskValidationReport(task_id=plan.task_id, issues=tuple(issues))
 
 
 def _validate_relation_attribute(
     schema: PhysicalSchema,
-    database: DatabaseInstance,
     task: PlannedTask,
 ) -> list[TaskValidationIssue]:
     plan = task.plan
     data = task.data
     issues: list[TaskValidationIssue] = []
-    if plan.target_table_id != plan.source_table_id:
-        issues.append(
-            _issue("attribute_source", "attribute target and source table differ")
-        )
-        return issues
     try:
         column = schema.table(plan.target_table_id).column(
             plan.target_column_id or ""
@@ -147,19 +147,10 @@ def _validate_relation_attribute(
         issues.append(_issue("target_kind", "attribute target is not a feature"))
     if plan.target_column_id not in plan.masked_column_ids:
         issues.append(_issue("target_leakage", "query target column is not masked"))
-    values = database.table(plan.target_table_id).column(column.column_id)
-    if not _arrays_equal(
-        data.support_labels,
-        values[data.support_row_ids],
-    ) or not _arrays_equal(
-        data.query_labels,
-        values[data.query_row_ids],
-    ):
-        issues.append(_issue("attribute_labels", "labels differ from target column"))
     return issues
 
 
-def _validate_future_event(
+def _validate_mechanism_labels(
     schema: PhysicalSchema,
     database: DatabaseInstance,
     task: PlannedTask,
@@ -167,11 +158,23 @@ def _validate_future_event(
     plan = task.plan
     data = task.data
     issues: list[TaskValidationIssue] = []
-    expected = future_event_labels(schema, database, plan)
+    try:
+        expected = mechanism_labels(schema, database, plan)
+    except (KeyError, ValueError, StopIteration) as error:
+        return [_issue("mechanism_recompute", f"cannot recompute labels: {error}")]
     if not np.array_equal(data.support_labels, expected[data.support_row_ids]):
-        issues.append(_issue("future_support_labels", "support labels are incorrect"))
+        issues.append(_issue("support_labels", "support labels are inconsistent with mechanism"))
     if not np.array_equal(data.query_labels, expected[data.query_row_ids]):
-        issues.append(_issue("future_query_labels", "query labels are incorrect"))
+        issues.append(_issue("query_labels", "query labels are inconsistent with mechanism"))
+    return issues
+
+
+def _validate_future_visibility(
+    schema: PhysicalSchema,
+    task: PlannedTask,
+) -> list[TaskValidationIssue]:
+    plan = task.plan
+    issues: list[TaskValidationIssue] = []
     source_rules = [
         rule
         for rule in plan.observation_rules
@@ -188,7 +191,7 @@ def _validate_future_event(
     expected_rules = {
         (table.table_id, column.column_id)
         for table in schema.tables
-        if table.role is TableRole.EVENT
+        if table.role in {TableRole.EVENT, TableRole.DETAIL}
         for column in table.columns
         if column.kind is ColumnKind.TIME
     }
@@ -201,7 +204,7 @@ def _validate_future_event(
         issues.append(
             _issue(
                 "global_future_visibility",
-                "every Event table must use the common task cutoff",
+                "every temporal Event/Detail table must use the common task cutoff",
             )
         )
     return issues
@@ -249,6 +252,37 @@ def _validate_route_supervision(
                 break
             visited.add(following)
             current = following
+    return issues
+
+
+def _validate_required_route_endpoint(
+    schema: PhysicalSchema,
+    plan: TaskPlan,
+) -> list[TaskValidationIssue]:
+    required = [
+        label for label in plan.route_supervision
+        if label.role is RouteRole.REQUIRED
+    ]
+    if not required:
+        return [_issue("required_route", "task has no required route")]
+    foreign_keys = {fk.foreign_key_id: fk for fk in schema.foreign_keys}
+    issues: list[TaskValidationIssue] = []
+    for label in required:
+        current = plan.target_table_id
+        for foreign_key_id in label.foreign_key_ids:
+            fk = foreign_keys[foreign_key_id]
+            current = (
+                fk.child_table_id
+                if current == fk.parent_table_id
+                else fk.parent_table_id
+            )
+        if current != plan.source_table_id:
+            issues.append(
+                _issue(
+                    "required_route_endpoint",
+                    "required route endpoint differs from source_table_id",
+                )
+            )
     return issues
 
 

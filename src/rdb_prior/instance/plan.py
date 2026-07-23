@@ -17,6 +17,22 @@ class FeatureSCMFamily(str, Enum):
     MLP = "mlp"
 
 
+class RootCauseFamily(str, Enum):
+    """Distribution family for exogenous latent (root) variables in the SCM.
+
+    Each table draws one family; its latent rows are then generated from
+    that distribution and standardised to unit variance so that downstream
+    feature SCMs receive inputs with diverse shape characteristics (skew,
+    heavy tails, multi-modality) while maintaining consistent scale.
+    """
+
+    STANDARD_NORMAL = "standard_normal"
+    LINEAR = "linear"
+    NONLINEAR = "nonlinear"
+    LOGNORMAL = "lognormal"
+    GAUSSIAN_MIXTURE = "gaussian_mixture"
+
+
 class TemporalFamily(str, Enum):
     NONE = "none"
     PARENT_BURST = "parent_burst"
@@ -54,6 +70,7 @@ class TableMechanismPlan:
     latent_seed: int
     feature_seed: int
     temporal_seed: int
+    root_cause_family: RootCauseFamily = RootCauseFamily.STANDARD_NORMAL
     parameters: tuple[tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
@@ -65,6 +82,8 @@ class TableMechanismPlan:
         _positive_int("latent_dimension", self.latent_dimension)
         if not isinstance(self.feature_family, FeatureSCMFamily):
             raise TypeError("feature_family must be FeatureSCMFamily")
+        if not isinstance(self.root_cause_family, RootCauseFamily):
+            raise TypeError("root_cause_family must be RootCauseFamily")
         if not isinstance(self.temporal_family, TemporalFamily):
             raise TypeError("temporal_family must be TemporalFamily")
         for name in ("latent_seed", "feature_seed", "temporal_seed"):
@@ -126,6 +145,7 @@ class InstancePlan:
     generation_order: tuple[str, ...]
     tables: tuple[TableMechanismPlan, ...]
     relations: tuple[RelationMechanismPlan, ...]
+    parameters: tuple[tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("plan_id", "sample_id", "schema_id", "blueprint_id"):
@@ -152,9 +172,14 @@ class InstancePlan:
         )
         if len(set(relation_ids)) != len(relation_ids):
             raise ValueError("relation group IDs must be unique")
+        object.__setattr__(self, "parameters", _parameters(self.parameters))
 
     def table(self, table_id: str) -> TableMechanismPlan:
         return next(table for table in self.tables if table.table_id == table_id)
+
+    @property
+    def parameter_map(self) -> Mapping[str, float]:
+        return MappingProxyType(dict(self.parameters))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -175,6 +200,7 @@ class InstancePlan:
                     },
                     "latent_dimension": table.latent_dimension,
                     "feature_family": table.feature_family.value,
+                    "root_cause_family": table.root_cause_family.value,
                     "temporal_family": table.temporal_family.value,
                     "latent_seed": table.latent_seed,
                     "feature_seed": table.feature_seed,
@@ -196,6 +222,7 @@ class InstancePlan:
                 }
                 for relation in self.relations
             ],
+            "parameters": dict(self.parameters),
         }
 
     @classmethod
@@ -216,6 +243,9 @@ class InstancePlan:
                     ),
                     latent_dimension=item["latent_dimension"],
                     feature_family=FeatureSCMFamily(item["feature_family"]),
+                    root_cause_family=RootCauseFamily(
+                        item.get("root_cause_family", "standard_normal")
+                    ),
                     temporal_family=TemporalFamily(item["temporal_family"]),
                     latent_seed=item["latent_seed"],
                     feature_seed=item["feature_seed"],
@@ -245,6 +275,7 @@ class InstancePlan:
             generation_order=tuple(data["generation_order"]),
             tables=tuple(table_values),
             relations=relation_values,
+            parameters=tuple(data.get("parameters", {}).items()),
         )
 
 
@@ -297,6 +328,7 @@ def _parameters(
 
 __all__ = [
     "FeatureSCMFamily",
+    "RootCauseFamily",
     "TemporalFamily",
     "PopulationPlan",
     "TableMechanismPlan",

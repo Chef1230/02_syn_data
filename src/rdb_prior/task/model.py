@@ -11,9 +11,22 @@ import numpy as np
 
 
 class TaskMechanism(str, Enum):
+    ENTITY_FUTURE_EVENT_EXISTENCE = "entity_future_event_existence"
     RELATION_ATTRIBUTE = "relation_attribute"
-    FUTURE_EVENT_EXISTENCE = "future_event_existence"
+    FUTURE_EVENT_ATTRIBUTE_CONDITION = "future_event_attribute_condition"
+    TEMPORAL_RELATIONAL_AGGREGATE = "temporal_relational_aggregate"
 
+
+class ClassificationKind(str, Enum):
+    BINARY = "binary"
+    CATEGORICAL = "categorical"
+
+
+class AggregateOperator(str, Enum):
+    COUNT = "count"
+    SUM = "sum"
+    MAX = "max"
+    MIN = "min"
 
 class PredictionType(str, Enum):
     CLASSIFICATION = "classification"
@@ -100,6 +113,7 @@ class TaskPlan:
     split_strategy: str
     seed: int
     target_column_id: str | None = None
+    source_column_id: str | None = None
     foreign_key_id: str | None = None
     time_column_id: str | None = None
     cutoff_time: int | None = None
@@ -108,6 +122,11 @@ class TaskPlan:
     masked_column_ids: tuple[str, ...] = ()
     observation_rules: tuple[ObservationRule, ...] = ()
     route_supervision: tuple[RoutePathLabel, ...] = ()
+    classification_kind: ClassificationKind | None = None
+    aggregate_operator: AggregateOperator | None = None
+    threshold: float | None = None
+    requested_positive_rate: float | None = None
+    realized_positive_rate: float | None = None
     parameters: tuple[tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
@@ -131,6 +150,7 @@ class TaskPlan:
             raise ValueError("seed must be non-negative")
         for name in (
             "target_column_id",
+            "source_column_id",
             "foreign_key_id",
             "time_column_id",
             "row_cutoff_time_column_id",
@@ -138,6 +158,24 @@ class TaskPlan:
             value = getattr(self, name)
             if value is not None:
                 _identifier(name, value)
+        if self.classification_kind is not None and not isinstance(
+            self.classification_kind, ClassificationKind
+        ):
+            raise TypeError("classification_kind must be ClassificationKind or None")
+        if self.aggregate_operator is not None and not isinstance(
+            self.aggregate_operator, AggregateOperator
+        ):
+            raise TypeError("aggregate_operator must be AggregateOperator or None")
+        for name in ("threshold", "requested_positive_rate", "realized_positive_rate"):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, (int, float))
+            ):
+                raise TypeError(f"{name} must be numeric or None")
+        for name in ("requested_positive_rate", "realized_positive_rate"):
+            value = getattr(self, name)
+            if value is not None and not 0.0 <= float(value) <= 1.0:
+                raise ValueError(f"{name} must be in [0, 1]")
         for name in ("cutoff_time", "horizon_end_time"):
             value = getattr(self, name)
             if value is not None and (
@@ -197,10 +235,18 @@ class TaskPlan:
             self.target_table_id,
             self.source_table_id,
             self.target_column_id,
+            self.source_column_id,
             self.foreign_key_id,
             self.cutoff_time,
             self.horizon_end_time,
             self.row_cutoff_time_column_id,
+            self.classification_kind,
+            self.aggregate_operator,
+            tuple(
+                label.foreign_key_ids
+                for label in self.route_supervision
+                if label.role is RouteRole.REQUIRED
+            ),
         )
 
     def _validate_mechanism_contract(self) -> None:
@@ -218,7 +264,7 @@ class TaskPlan:
                 )
             ):
                 raise ValueError("relation attribute task has temporal FK fields")
-        elif self.mechanism is TaskMechanism.FUTURE_EVENT_EXISTENCE:
+        elif self.mechanism is TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE:
             if self.prediction_type is not PredictionType.CLASSIFICATION:
                 raise ValueError("future event existence must be classification")
             if None in (
@@ -230,6 +276,18 @@ class TaskPlan:
                 raise ValueError("future event existence requires FK and horizon")
             if self.target_column_id is not None or self.masked_column_ids:
                 raise ValueError("future event existence uses a synthetic label")
+        elif self.mechanism is TaskMechanism.FUTURE_EVENT_ATTRIBUTE_CONDITION:
+            if self.target_column_id is None or self.row_cutoff_time_column_id is None:
+                raise ValueError("future event attribute requires target and cutoff columns")
+            if self.target_column_id not in self.masked_column_ids:
+                raise ValueError("future event attribute target must be masked")
+        elif self.mechanism is TaskMechanism.TEMPORAL_RELATIONAL_AGGREGATE:
+            if self.aggregate_operator is None or self.time_column_id is None:
+                raise ValueError("temporal aggregate requires operator and time column")
+            if not any(
+                label.role is RouteRole.REQUIRED for label in self.route_supervision
+            ):
+                raise ValueError("temporal aggregate requires an exact required path")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -242,6 +300,7 @@ class TaskPlan:
             "target_table_id": self.target_table_id,
             "source_table_id": self.source_table_id,
             "target_column_id": self.target_column_id,
+            "source_column_id": self.source_column_id,
             "foreign_key_id": self.foreign_key_id,
             "time_column_id": self.time_column_id,
             "cutoff_time": self.cutoff_time,
@@ -256,6 +315,15 @@ class TaskPlan:
             "route_supervision": [
                 label.to_dict() for label in self.route_supervision
             ],
+            "classification_kind": (
+                None if self.classification_kind is None else self.classification_kind.value
+            ),
+            "aggregate_operator": (
+                None if self.aggregate_operator is None else self.aggregate_operator.value
+            ),
+            "threshold": self.threshold,
+            "requested_positive_rate": self.requested_positive_rate,
+            "realized_positive_rate": self.realized_positive_rate,
             "parameters": dict(self.parameters),
         }
 
@@ -266,11 +334,16 @@ class TaskPlan:
             sample_id=data["sample_id"],
             instance_id=data["instance_id"],
             schema_id=data["schema_id"],
-            mechanism=TaskMechanism(data["mechanism"]),
+            mechanism=TaskMechanism(
+                "entity_future_event_existence"
+                if data["mechanism"] == "future_event_existence"
+                else data["mechanism"]
+            ),
             prediction_type=PredictionType(data["prediction_type"]),
             target_table_id=data["target_table_id"],
             source_table_id=data["source_table_id"],
             target_column_id=data.get("target_column_id"),
+            source_column_id=data.get("source_column_id"),
             foreign_key_id=data.get("foreign_key_id"),
             time_column_id=data.get("time_column_id"),
             cutoff_time=data.get("cutoff_time"),
@@ -289,6 +362,19 @@ class TaskPlan:
                 RoutePathLabel.from_dict(item)
                 for item in data.get("route_supervision", ())
             ),
+            classification_kind=(
+                None
+                if data.get("classification_kind") is None
+                else ClassificationKind(data["classification_kind"])
+            ),
+            aggregate_operator=(
+                None
+                if data.get("aggregate_operator") is None
+                else AggregateOperator(data["aggregate_operator"])
+            ),
+            threshold=data.get("threshold"),
+            requested_positive_rate=data.get("requested_positive_rate"),
+            realized_positive_rate=data.get("realized_positive_rate"),
             parameters=tuple(data.get("parameters", {}).items()),
         )
 
@@ -361,6 +447,8 @@ def _parameters(
 
 __all__ = [
     "TaskMechanism",
+    "ClassificationKind",
+    "AggregateOperator",
     "PredictionType",
     "RouteRole",
     "RoutePathLabel",
