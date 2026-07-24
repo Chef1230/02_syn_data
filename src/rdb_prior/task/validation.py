@@ -19,6 +19,7 @@ from rdb_prior.task.model import (
     TaskMechanism,
     TaskPlan,
 )
+from rdb_prior.task.view import build_task_view
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -81,8 +82,29 @@ def validate_task(
         return TaskValidationReport(task_id=plan.task_id, issues=tuple(issues))
 
     all_rows = np.concatenate([data.support_row_ids, data.query_row_ids])
-    if np.any(all_rows >= target_data.row_count):
+    if np.any((all_rows < 0) | (all_rows >= target_data.row_count)):
         issues.append(_issue("row_bounds", "task row ID is outside target table"))
+    else:
+        try:
+            target_mask = build_task_view(
+                schema, database, plan
+            ).row_masks[plan.target_table_id]
+        except (IndexError, KeyError):
+            issues.append(
+                _issue(
+                    "observation_visibility",
+                    "task observation rules cannot be applied",
+                )
+            )
+        else:
+            if not np.all(target_mask[data.support_row_ids]):
+                issues.append(
+                    _issue("support_visibility", "support contains hidden rows")
+                )
+            if not np.all(target_mask[data.query_row_ids]):
+                issues.append(
+                    _issue("query_visibility", "query contains hidden rows")
+                )
     for labels in (data.support_labels, data.query_labels):
         if labels.dtype.kind == "f" and np.any(~np.isfinite(labels)):
             issues.append(_issue("non_finite_label", "task labels are not finite"))

@@ -28,6 +28,7 @@ from rdb_prior.task.model import (
     TaskMechanism,
     TaskPlan,
 )
+from rdb_prior.task.view import build_task_view
 
 # Sentinel column id used by mechanisms whose label is computed rather than
 # sourced from an existing feature column.
@@ -326,7 +327,9 @@ def build_relation_attribute_task(
         ),
         parameters=(("class_count", candidate.class_count), ("support_fraction", support_fraction)),
     )
-    return _planned(plan, labels, support, query)
+    return _planned_if_visible(
+        schema, database, plan, labels, support, query
+    )
 
 
 def build_future_event_existence_task(
@@ -391,7 +394,9 @@ def build_future_event_existence_task(
         realized_positive_rate=float(np.mean(labels)),
         parameters=(("cutoff_quantile", cutoff_q), ("support_fraction", support_fraction)),
     )
-    return _planned(plan, labels, support, query)
+    return _planned_if_visible(
+        schema, database, plan, labels, support, query
+    )
 
 
 def build_future_event_attribute_condition_task(
@@ -440,7 +445,9 @@ def build_future_event_attribute_condition_task(
         realized_positive_rate=float(np.mean(labels)),
         parameters=(("support_fraction", support_fraction),),
     )
-    return _planned(plan, labels, support, query)
+    return _planned_if_visible(
+        schema, database, plan, labels, support, query
+    )
 
 
 def build_temporal_relational_aggregate_task(
@@ -505,7 +512,9 @@ def build_temporal_relational_aggregate_task(
         realized_positive_rate=float(np.mean(labels)),
         parameters=(("window", window), ("support_fraction", support_fraction)),
     )
-    return _planned(plan, labels, support, query)
+    return _planned_if_visible(
+        schema, database, plan, labels, support, query
+    )
 
 
 def mechanism_labels(
@@ -707,6 +716,24 @@ def _planned(plan: TaskPlan, labels: np.ndarray, support: np.ndarray, query: np.
     )
 
 
+def _planned_if_visible(
+    schema: PhysicalSchema,
+    database: DatabaseInstance,
+    plan: TaskPlan,
+    labels: np.ndarray,
+    support: np.ndarray,
+    query: np.ndarray,
+) -> PlannedTask | None:
+    task = _planned(plan, labels, support, query)
+    target_mask = build_task_view(
+        schema, database, plan
+    ).row_masks[plan.target_table_id]
+    supervised_rows = np.concatenate((support, query))
+    if not np.all(target_mask[supervised_rows]):
+        return None
+    return task
+
+
 def _usable_feature_columns(
     schema: PhysicalSchema, database: DatabaseInstance, table_id: str
 ) -> tuple[str, ...]:
@@ -820,7 +847,8 @@ def _temporal_split(
     min_class_count: int,
 ) -> tuple[np.ndarray, np.ndarray] | None:
     """Support/query split respecting temporal order for cutoff_time export."""
-    groups = [np.flatnonzero(labels == value).astype(np.int64) for value in np.unique(labels)]
+    class_values = np.unique(labels)
+    groups = [np.flatnonzero(labels == value).astype(np.int64) for value in class_values]
     if len(groups) < 2 or any(len(group) < 2 * min_class_count for group in groups):
         return None
     support_count = max(min_support_rows, round(len(ordered) * support_fraction))
@@ -829,10 +857,16 @@ def _temporal_split(
         return None
     support = ordered[:support_count].copy()
     query = ordered[support_count:].copy()
-    rng.shuffle(support)
-    rng.shuffle(query)
     if len(query) < min_query_rows:
         return None
+    for rows in (support, query):
+        if any(
+            np.count_nonzero(labels[rows] == value) < min_class_count
+            for value in class_values
+        ):
+            return None
+    rng.shuffle(support)
+    rng.shuffle(query)
     return support, query
 
 

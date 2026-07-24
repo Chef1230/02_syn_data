@@ -1,0 +1,2 @@
+[console_scripts]
+rdb-prior = rdb_prior.cli:main

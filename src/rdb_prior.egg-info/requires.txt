@@ -1,0 +1,9 @@
+h5py>=3.8
+numpy>=1.24
+PyYAML>=6.0
+
+[relbench]
+relbench<3,>=2.1
+
+[router]
+torch>=2.2

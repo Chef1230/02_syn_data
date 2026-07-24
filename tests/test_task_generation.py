@@ -28,7 +28,11 @@ from rdb_prior.pipeline import (
 from rdb_prior.runtime import RuntimeContext
 from rdb_prior.schema.sampler import BlueprintSampler, BlueprintSamplerConfig
 from rdb_prior.task.artifacts import load_task_artifact
-from rdb_prior.task.mechanisms import future_event_labels, mechanism_labels
+from rdb_prior.task.mechanisms import (
+    _temporal_split,
+    future_event_labels,
+    mechanism_labels,
+)
 from rdb_prior.task.model import RouteRole, TaskMechanism, TaskPlan
 from rdb_prior.task.pipeline import TaskPipelineConfig, generate_tasks
 from rdb_prior.task.planner import TaskPlanner, TaskPlannerConfig
@@ -58,6 +62,22 @@ class TaskGenerationTests(unittest.TestCase):
         )
         database = DatabaseGenerator().generate(schema=schema, plan=plan)
         return runtime, schema, database
+
+    def test_temporal_split_rejects_single_class_query(self) -> None:
+        labels = np.asarray([0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1], dtype=np.int8)
+        ordered = np.arange(len(labels), dtype=np.int64)
+
+        split = _temporal_split(
+            labels,
+            ordered,
+            np.random.default_rng(17),
+            support_fraction=0.5,
+            min_support_rows=4,
+            min_query_rows=4,
+            min_class_count=2,
+        )
+
+        self.assertIsNone(split)
 
     def test_relation_attribute_task_masks_target_and_round_trips(self) -> None:
         runtime, schema, database = self._database("attribute_task")
@@ -91,6 +111,13 @@ class TaskGenerationTests(unittest.TestCase):
                     task.plan.target_table_id,
                     task.plan.target_column_id or "",
                 )
+            )
+            target_mask = view.row_masks[task.plan.target_table_id]
+            self.assertTrue(
+                np.all(target_mask[task.data.support_row_ids])
+            )
+            self.assertTrue(
+                np.all(target_mask[task.data.query_row_ids])
             )
             self.assertEqual(task.plan, TaskPlan.from_dict(task.plan.to_dict()))
 
@@ -267,6 +294,14 @@ class TaskGenerationTests(unittest.TestCase):
             np.testing.assert_array_equal(
                 task.data.query_labels,
                 expected[task.data.query_row_ids],
+            )
+            view = build_task_view(schema, database, task.plan)
+            target_mask = view.row_masks[task.plan.target_table_id]
+            self.assertTrue(
+                np.all(target_mask[task.data.support_row_ids])
+            )
+            self.assertTrue(
+                np.all(target_mask[task.data.query_row_ids])
             )
             self.assertTrue(validate_task(schema, database, task).is_valid)
 
