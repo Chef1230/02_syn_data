@@ -55,7 +55,9 @@ physical_design:
   schema_id_prefix: schema
   min_feature_columns: 2
   max_feature_columns: 6
-  feature_nullable_probability: 0.15
+  # Real databases are sparse at the column level: many columns are complete,
+  # while a minority are nullable and can be heavily missing.
+  feature_nullable_probability: 0.35
   primary_key_names: [id, pk_id, row_id]
 
   feature_columns_by_table_count:
@@ -79,27 +81,40 @@ physical_design:
   # Role overrides take precedence over the table-count rules. Valid keys are
   # entity, event, lookup, bridge, and detail. Example value:
   # entity: {min_columns: 4, max_columns: 10}
-  feature_columns_by_role: {}
+  feature_columns_by_role:
+    entity: {min_columns: 4, max_columns: 16}
+    event: {min_columns: 3, max_columns: 12}
+    lookup: {min_columns: 2, max_columns: 6}
+    bridge: {min_columns: 1, max_columns: 6}
+    detail: {min_columns: 2, max_columns: 10}
 
 # Stage 02: PhysicalSchema -> role-conditioned database instance.
 instance:
-  entity_rows_min: 128
-  entity_rows_max: 512
-  lookup_rows_min: 4
-  lookup_rows_max: 32
-  event_fanout_min: 0.75
-  event_fanout_max: 4.0
-  bridge_rows_factor_min: 0.5
-  bridge_rows_factor_max: 2.0
-  detail_fanout_min: 0.75
-  detail_fanout_max: 4.0
-  entity_child_factor_min: 0.5
-  entity_child_factor_max: 1.5
-  max_rows_per_table: 2048
+  # Heavy-tailed, role-conditioned populations. Values are bounded for
+  # generation safety, but most draws stay near the median rather than the cap.
+  entity_rows_min: 100
+  entity_rows_max: 20000
+  entity_rows_distribution: lognormal
+  entity_rows_median: 1500
+  entity_rows_log_sigma: 1.15
+  lookup_rows_min: 3
+  lookup_rows_max: 200
+  lookup_rows_distribution: loguniform
+  event_fanout_min: 0.10
+  event_fanout_max: 30.0
+  bridge_rows_factor_min: 0.05
+  bridge_rows_factor_max: 8.0
+  detail_fanout_min: 0.20
+  detail_fanout_max: 12.0
+  entity_child_factor_min: 0.15
+  entity_child_factor_max: 3.0
+  population_scale_distribution: lognormal
+  population_scale_log_sigma: 1.0
+  max_rows_per_table: 50000
 
   latent_dimension: 4
-  optional_rate_min: 0.05
-  optional_rate_max: 0.25
+  optional_rate_min: 0.0
+  optional_rate_max: 0.40
   affinity_strength: 1.0
   degree_strength: 0.8
 
@@ -107,14 +122,23 @@ instance:
     linear: 0.35
     cam: 0.35
     mlp: 0.30
-  feature_missing_rate_min: 0.02
-  feature_missing_rate_max: 0.15
-  feature_noise_scale_min: 0.08
-  feature_noise_scale_max: 0.25
-  categorical_cardinality_min: 3
-  categorical_cardinality_max: 12
-  time_scale_seconds_min: 300.0
-  time_scale_seconds_max: 86400.0
+  # Zero-inflated missingness: most tables are complete, while the non-zero
+  # tail includes structurally sparse columns.
+  feature_missing_rate_min: 0.01
+  feature_missing_rate_max: 0.80
+  feature_missing_zero_probability: 0.70
+  feature_missing_beta_alpha: 1.2
+  feature_missing_beta_beta: 4.0
+  feature_noise_scale_min: 0.001
+  feature_noise_scale_max: 0.50
+  feature_noise_distribution: loguniform
+  categorical_cardinality_min: 2
+  categorical_cardinality_max: 30
+  categorical_high_cardinality_probability: 0.12
+  categorical_high_cardinality_min: 31
+  categorical_high_cardinality_max: 2000
+  time_scale_seconds_min: 60.0
+  time_scale_seconds_max: 2592000.0
 
 instance_generation:
   # null consumes every schema after start_index.

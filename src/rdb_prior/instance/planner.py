@@ -29,8 +29,12 @@ _DEFAULT_SCM_WEIGHTS = (
 class InstancePlannerConfig:
     entity_rows_min: int = 128
     entity_rows_max: int = 512
+    entity_rows_distribution: str = "loguniform"
+    entity_rows_median: int = 256
+    entity_rows_log_sigma: float = 0.8
     lookup_rows_min: int = 4
     lookup_rows_max: int = 32
+    lookup_rows_distribution: str = "uniform"
     event_fanout_min: float = 0.75
     event_fanout_max: float = 4.0
     bridge_rows_factor_min: float = 0.5
@@ -39,6 +43,8 @@ class InstancePlannerConfig:
     detail_fanout_max: float = 4.0
     entity_child_factor_min: float = 0.5
     entity_child_factor_max: float = 1.5
+    population_scale_distribution: str = "uniform"
+    population_scale_log_sigma: float = 0.8
     max_rows_per_table: int = 2048
     latent_dimension: int = 4
     optional_rate_min: float = 0.05
@@ -47,10 +53,17 @@ class InstancePlannerConfig:
     degree_strength: float = 0.8
     feature_missing_rate_min: float = 0.02
     feature_missing_rate_max: float = 0.15
+    feature_missing_zero_probability: float = 0.0
+    feature_missing_beta_alpha: float = 1.0
+    feature_missing_beta_beta: float = 1.0
     feature_noise_scale_min: float = 0.08
     feature_noise_scale_max: float = 0.25
+    feature_noise_distribution: str = "uniform"
     categorical_cardinality_min: int = 3
     categorical_cardinality_max: int = 12
+    categorical_high_cardinality_probability: float = 0.0
+    categorical_high_cardinality_min: int = 13
+    categorical_high_cardinality_max: int = 256
     time_scale_seconds_min: float = 300.0
     time_scale_seconds_max: float = 86_400.0
     scm_weights: tuple[tuple[FeatureSCMFamily, float], ...] = (
@@ -63,11 +76,27 @@ class InstancePlannerConfig:
             self.entity_rows_min,
             self.entity_rows_max,
         )
+        if self.entity_rows_distribution not in {"loguniform", "lognormal"}:
+            raise ValueError(
+                "entity_rows_distribution must be loguniform or lognormal"
+            )
+        if (
+            self.entity_rows_distribution == "lognormal"
+            and not self.entity_rows_min
+            <= self.entity_rows_median
+            <= self.entity_rows_max
+        ):
+            raise ValueError("entity_rows_median must lie within entity row bounds")
+        _positive_scalar("entity_rows_log_sigma", self.entity_rows_log_sigma)
         _integer_range(
             "lookup rows",
             self.lookup_rows_min,
             self.lookup_rows_max,
         )
+        if self.lookup_rows_distribution not in {"uniform", "loguniform"}:
+            raise ValueError(
+                "lookup_rows_distribution must be uniform or loguniform"
+            )
         for name, low, high in (
             ("event fanout", self.event_fanout_min, self.event_fanout_max),
             (
@@ -83,6 +112,19 @@ class InstancePlannerConfig:
             ),
         ):
             _positive_range(name, low, high)
+        if self.population_scale_distribution not in {
+            "uniform",
+            "loguniform",
+            "lognormal",
+        }:
+            raise ValueError(
+                "population_scale_distribution must be uniform, loguniform "
+                "or lognormal"
+            )
+        _positive_scalar(
+            "population_scale_log_sigma",
+            self.population_scale_log_sigma,
+        )
         for name, value in (
             ("max_rows_per_table", self.max_rows_per_table),
             ("latent_dimension", self.latent_dimension),
@@ -104,16 +146,51 @@ class InstancePlannerConfig:
             < 1
         ):
             raise ValueError("feature missing rates must satisfy 0 <= min <= max < 1")
+        if not 0 <= self.feature_missing_zero_probability <= 1:
+            raise ValueError(
+                "feature_missing_zero_probability must be between zero and one"
+            )
+        _positive_scalar(
+            "feature_missing_beta_alpha",
+            self.feature_missing_beta_alpha,
+        )
+        _positive_scalar(
+            "feature_missing_beta_beta",
+            self.feature_missing_beta_beta,
+        )
         _positive_range(
             "feature noise scale",
             self.feature_noise_scale_min,
             self.feature_noise_scale_max,
         )
+        if self.feature_noise_distribution not in {"uniform", "loguniform"}:
+            raise ValueError(
+                "feature_noise_distribution must be uniform or loguniform"
+            )
         _integer_range(
             "categorical cardinality",
             self.categorical_cardinality_min,
             self.categorical_cardinality_max,
         )
+        if not 0 <= self.categorical_high_cardinality_probability <= 1:
+            raise ValueError(
+                "categorical_high_cardinality_probability must be between "
+                "zero and one"
+            )
+        _integer_range(
+            "high categorical cardinality",
+            self.categorical_high_cardinality_min,
+            self.categorical_high_cardinality_max,
+        )
+        if (
+            self.categorical_high_cardinality_probability > 0
+            and self.categorical_high_cardinality_min
+            <= self.categorical_cardinality_max
+        ):
+            raise ValueError(
+                "high categorical cardinality range must start above the "
+                "ordinary range"
+            )
         _positive_range(
             "time scale seconds",
             self.time_scale_seconds_min,
@@ -202,30 +279,15 @@ class InstancePlanner:
                 parameters=(
                     (
                         "categorical_cardinality",
-                        float(
-                            parameter_rng.integers(
-                                self.config.categorical_cardinality_min,
-                                self.config.categorical_cardinality_max + 1,
-                            )
-                        ),
+                        float(self._categorical_cardinality(parameter_rng)),
                     ),
                     (
                         "missing_rate",
-                        float(
-                            parameter_rng.uniform(
-                                self.config.feature_missing_rate_min,
-                                self.config.feature_missing_rate_max,
-                            )
-                        ),
+                        self._missing_rate(parameter_rng),
                     ),
                     (
                         "noise_scale",
-                        float(
-                            parameter_rng.uniform(
-                                self.config.feature_noise_scale_min,
-                                self.config.feature_noise_scale_max,
-                            )
-                        ),
+                        self._noise_scale(parameter_rng),
                     ),
                     (
                         "time_scale_seconds",
@@ -267,23 +329,41 @@ class InstancePlanner:
             and fk.relation_strategy != "lookup_assignment"
         ]
         if role is TableRole.LOOKUP:
-            count = int(
-                rng.integers(
-                    self.config.lookup_rows_min,
-                    self.config.lookup_rows_max + 1,
+            if self.config.lookup_rows_distribution == "loguniform":
+                count = round(
+                    exp(
+                        rng.uniform(
+                            log(self.config.lookup_rows_min),
+                            log(self.config.lookup_rows_max + 1),
+                        )
+                    )
                 )
-            )
+            else:
+                count = int(
+                    rng.integers(
+                        self.config.lookup_rows_min,
+                        self.config.lookup_rows_max + 1,
+                    )
+                )
             return count, "fixed_exogenous", 1.0
         if not parent_counts:
             if role is not TableRole.ENTITY:
                 raise ValueError(f"root table {table_id} must be Entity/Lookup")
-            value = exp(
-                rng.uniform(
-                    log(self.config.entity_rows_min),
-                    log(self.config.entity_rows_max + 1),
+            if self.config.entity_rows_distribution == "lognormal":
+                value = rng.lognormal(
+                    mean=log(self.config.entity_rows_median),
+                    sigma=self.config.entity_rows_log_sigma,
                 )
-            )
-            return int(value), "root_entity", 1.0
+            else:
+                value = exp(
+                    rng.uniform(
+                        log(self.config.entity_rows_min),
+                        log(self.config.entity_rows_max + 1),
+                    )
+                )
+            count = round(value)
+            count = min(self.config.entity_rows_max, max(self.config.entity_rows_min, count))
+            return count, "root_entity", 1.0
 
         if role is TableRole.EVENT:
             low, high = self.config.event_fanout_min, self.config.event_fanout_max
@@ -304,9 +384,51 @@ class InstancePlanner:
             strategy = "entity_hierarchy_population"
             basis = max(parent_counts)
 
-        multiplier = float(rng.uniform(low, high))
+        multiplier = self._population_multiplier(rng, low, high)
         count = max(1, min(self.config.max_rows_per_table, round(basis * multiplier)))
         return count, strategy, multiplier
+
+    def _population_multiplier(self, rng, low: float, high: float) -> float:
+        distribution = self.config.population_scale_distribution
+        if distribution == "loguniform":
+            return float(exp(rng.uniform(log(low), log(high))))
+        if distribution == "lognormal":
+            value = rng.lognormal(
+                mean=0.5 * (log(low) + log(high)),
+                sigma=self.config.population_scale_log_sigma,
+            )
+            return float(min(high, max(low, value)))
+        return float(rng.uniform(low, high))
+
+    def _missing_rate(self, rng) -> float:
+        if rng.random() < self.config.feature_missing_zero_probability:
+            return 0.0
+        unit = rng.beta(
+            self.config.feature_missing_beta_alpha,
+            self.config.feature_missing_beta_beta,
+        )
+        low = self.config.feature_missing_rate_min
+        high = self.config.feature_missing_rate_max
+        return float(low + unit * (high - low))
+
+    def _noise_scale(self, rng) -> float:
+        low = self.config.feature_noise_scale_min
+        high = self.config.feature_noise_scale_max
+        if self.config.feature_noise_distribution == "loguniform":
+            return float(exp(rng.uniform(log(low), log(high))))
+        return float(rng.uniform(low, high))
+
+    def _categorical_cardinality(self, rng) -> int:
+        if (
+            rng.random()
+            < self.config.categorical_high_cardinality_probability
+        ):
+            low = self.config.categorical_high_cardinality_min
+            high = self.config.categorical_high_cardinality_max
+        else:
+            low = self.config.categorical_cardinality_min
+            high = self.config.categorical_cardinality_max
+        return int(round(exp(rng.uniform(log(low), log(high + 1)))))
 
     def _feature_family(
         self,
@@ -431,6 +553,13 @@ def _positive_range(name: str, low: float, high: float) -> None:
         raise TypeError(f"{name} bounds must be numeric")
     if low <= 0 or high < low:
         raise ValueError(f"invalid {name} bounds")
+
+
+def _positive_scalar(name: str, value: float) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be numeric")
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
 
 
 __all__ = ["InstancePlannerConfig", "InstancePlanner"]

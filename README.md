@@ -318,6 +318,16 @@ jointly with affinity, while Detail tables use parent-conditioned populations
 and the same Linear/CAM/MLP family. One shared latent registry drives FK choice
 and feature contexts; FK rows are therefore not sampled uniformly.
 
+The production `refactor_v2.yaml` uses a realistic heavy-tailed instance
+prior. Root Entity populations are bounded log-normal draws; Lookup sizes are
+log-uniform; Event, Detail, Bridge, and child-Entity populations are
+parent-conditioned log-normal multipliers. Missingness is zero-inflated with
+a Beta-distributed non-zero tail, noise is log-uniform, and categorical
+cardinality contains a small high-cardinality component. Role-specific feature
+widths prevent large schemas from forcing every table to be unrealistically
+narrow. The bounds remain explicit so large 20k-schema runs cannot create
+unbounded tables.
+
 The instance artifact can be loaded with
 `rdb_prior.artifacts.load_instance_artifact`.
 

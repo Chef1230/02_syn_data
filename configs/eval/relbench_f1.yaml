@@ -33,7 +33,7 @@ runtime:
   device: cuda
   cuda_visible_devices: "5"
   mixed_precision: bf16
-  overwrite: true
+  overwrite: false
   num_tasks: null
   start_index: 0
   progress_every: 1

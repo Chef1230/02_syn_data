@@ -100,6 +100,7 @@ class RelBenchImportTests(unittest.TestCase):
                 {
                     "user_id": ["user-a", "user-b"],
                     "country": ["cn", "us"],
+                    "birth_date": pd.to_datetime(["1940-01-01", "1945-01-01"]),
                 }
             ),
             pkey_col="user_id",

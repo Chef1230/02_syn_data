@@ -88,26 +88,46 @@ for task in "${tasks[@]}"; do
   metadata="${output}/relbench_metadata.json"
 
   echo
-  echo "[relbench-all] ${RELBENCH_DATASET}/${task}: convert"
-  if ! RELBENCH_TASK="${task}" RELBENCH_OUTPUT="${output}" \
-      bash "${SCRIPT_DIR}/relbench.sh" convert; then
-    echo "[relbench-all] ${RELBENCH_DATASET}/${task}: SKIPPED (unsupported or conversion failed)"
-    skipped=$((skipped + 1))
+  echo "[relbench-all] ${RELBENCH_DATASET}/${task}: inspect"
+  if ! task_type="$(
+      "${PYTHON_BIN}" -c \
+        'import sys; from relbench.tasks import get_task; t=get_task(sys.argv[1], sys.argv[2], download=sys.argv[3].lower() in {"1", "true", "yes"}); print(getattr(t.task_type, "value", t.task_type))' \
+        "${RELBENCH_DATASET}" "${task}" "${DOWNLOAD:-0}"
+    )"; then
+    echo "[relbench-all] ${RELBENCH_DATASET}/${task}: FAILED (task inspection)"
+    failed=$((failed + 1))
     processed=$((processed + 1))
-    print_progress "${task}" "skipped"
+    print_progress "${task}" "failed:inspect"
     continue
   fi
-
-  task_type="$(
-    "${PYTHON_BIN}" -c \
-      'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["relbench_task_type"])' \
-      "${metadata}"
-  )"
   if [[ "${task_type}" != "binary_classification" ]]; then
     echo "[relbench-all] ${RELBENCH_DATASET}/${task}: SKIPPED (${task_type}; TFM is binary-only)"
     skipped=$((skipped + 1))
     processed=$((processed + 1))
     print_progress "${task}" "skipped:${task_type}"
+    continue
+  fi
+
+  echo "[relbench-all] ${RELBENCH_DATASET}/${task}: convert"
+  if ! RELBENCH_TASK="${task}" RELBENCH_OUTPUT="${output}" \
+      bash "${SCRIPT_DIR}/relbench.sh" convert; then
+    echo "[relbench-all] ${RELBENCH_DATASET}/${task}: FAILED (conversion)"
+    failed=$((failed + 1))
+    processed=$((processed + 1))
+    print_progress "${task}" "failed:convert"
+    continue
+  fi
+
+  converted_task_type="$(
+    "${PYTHON_BIN}" -c \
+      'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["relbench_task_type"])' \
+      "${metadata}"
+  )"
+  if [[ "${converted_task_type}" != "${task_type}" ]]; then
+    echo "[relbench-all] ${RELBENCH_DATASET}/${task}: FAILED (task type changed during conversion)"
+    failed=$((failed + 1))
+    processed=$((processed + 1))
+    print_progress "${task}" "failed:type-mismatch"
     continue
   fi
 

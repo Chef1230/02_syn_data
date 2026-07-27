@@ -42,6 +42,18 @@ class SchemaConfigTests(unittest.TestCase):
         self.assertEqual(run_root / "schema", schema.output_root)
         self.assertEqual(8, instance.num_workers)
         self.assertEqual(
+            "lognormal",
+            instance.planner.entity_rows_distribution,
+        )
+        self.assertEqual(
+            0.70,
+            instance.planner.feature_missing_zero_probability,
+        )
+        self.assertEqual(
+            0.12,
+            instance.planner.categorical_high_cardinality_probability,
+        )
+        self.assertEqual(
             run_root / "schema" / "manifest.json",
             instance.schema_manifest,
         )

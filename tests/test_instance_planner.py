@@ -112,6 +112,66 @@ class InstancePlannerTests(unittest.TestCase):
             return
         self.fail("sampler did not produce a bridge schema")
 
+    def test_realistic_prior_is_bounded_and_zero_inflated(self) -> None:
+        runtime = RuntimeContext(121).for_sample("realistic_prior")
+        blueprint = BlueprintSampler(
+            BlueprintSamplerConfig(min_tables=8, max_tables=8)
+        ).sample("realistic_prior", runtime)
+        schema = PhysicalSchemaCompiler().compile(
+            blueprint,
+            "realistic_prior",
+            runtime,
+        )
+        config = InstancePlannerConfig(
+            entity_rows_min=100,
+            entity_rows_max=20000,
+            entity_rows_distribution="lognormal",
+            entity_rows_median=1500,
+            entity_rows_log_sigma=1.15,
+            lookup_rows_min=3,
+            lookup_rows_max=200,
+            lookup_rows_distribution="loguniform",
+            population_scale_distribution="lognormal",
+            population_scale_log_sigma=1.0,
+            max_rows_per_table=50000,
+            feature_missing_rate_min=0.01,
+            feature_missing_rate_max=0.80,
+            feature_missing_zero_probability=1.0,
+            feature_missing_beta_alpha=1.2,
+            feature_missing_beta_beta=4.0,
+            feature_noise_scale_min=0.001,
+            feature_noise_scale_max=0.5,
+            feature_noise_distribution="loguniform",
+            categorical_cardinality_min=2,
+            categorical_cardinality_max=30,
+            categorical_high_cardinality_probability=1.0,
+            categorical_high_cardinality_min=31,
+            categorical_high_cardinality_max=2000,
+        )
+        plan = InstancePlanner(config).plan(
+            sample_id="realistic_prior",
+            schema=schema,
+            runtime=runtime.child("database-instance"),
+        )
+
+        self.assertTrue(validate_instance_plan(schema, plan).is_valid)
+        self.assertTrue(
+            all(
+                table.population.row_count <= config.max_rows_per_table
+                for table in plan.tables
+            )
+        )
+        for table in plan.tables:
+            self.assertEqual(0.0, table.parameter_map["missing_rate"])
+            self.assertGreaterEqual(
+                table.parameter_map["categorical_cardinality"],
+                config.categorical_high_cardinality_min,
+            )
+            self.assertLessEqual(
+                table.parameter_map["categorical_cardinality"],
+                config.categorical_high_cardinality_max,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

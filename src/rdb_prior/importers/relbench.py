@@ -848,6 +848,7 @@ def _convert_database(
                 data_type, values = _feature_array(
                     frame[original_column],
                     max_text_length=max_text_length,
+                    timestamp_origin_ns=timestamp_origin_ns,
                 )
                 kind = ColumnKind.FEATURE
             nullable = (
@@ -1210,12 +1211,17 @@ def _map_foreign_keys(values: Any, parent_values: Any) -> np.ndarray:
 
 
 def _timestamp_origin_ns(database: Any, *, anchor_series: Any) -> int:
+    from pandas.api import types as ptypes
+
     minimum = 0
     maximum = 0
     timestamp_series = [anchor_series]
     for table in database.table_dict.values():
-        if table.time_col is not None and table.time_col in table.df.columns:
-            timestamp_series.append(table.df[table.time_col])
+        for column in table.df.columns:
+            if column == table.time_col or ptypes.is_datetime64_any_dtype(
+                table.df[column].dtype
+            ):
+                timestamp_series.append(table.df[column])
     for series in timestamp_series:
         raw, missing = _raw_timestamp_array(series)
         valid = raw[~missing]
@@ -1283,6 +1289,7 @@ def _feature_array(
     series: Any,
     *,
     max_text_length: int,
+    timestamp_origin_ns: int = 0,
 ) -> tuple[PhysicalDataType, np.ndarray]:
     import pandas as pd
     from pandas.api import types as ptypes
@@ -1310,7 +1317,9 @@ def _feature_array(
             pd.to_numeric(series, errors="coerce").to_numpy(dtype=np.float64),
         )
     if ptypes.is_datetime64_any_dtype(dtype):
-        return PhysicalDataType.TIMESTAMP, _timestamp_array(series)
+        return PhysicalDataType.TIMESTAMP, _timestamp_array(
+            series, origin_ns=timestamp_origin_ns
+        )
     encoded: list[str] = []
     for value in series.tolist():
         if isinstance(value, bytes):
