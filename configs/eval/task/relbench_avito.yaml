@@ -1,0 +1,41 @@
+relbench:
+  dataset: rel-f1
+  task: driver-dnf
+  cache_dir: /opt/data/private/cf/data/relbench/Cache
+  output: outputs/relbench/rel-f1/dnf
+  output_root: outputs/relbench/rel-f1
+  download: false
+  score_download: false
+  seed: 0
+  max_rows_per_task: 600
+  query_rows_per_task: 256
+  support_rows: null
+  max_classes: 16
+  max_text_length: 256
+
+router:
+  checkpoint: outputs/refactor_v2/router/checkpoints/best.pt
+  config: configs/refactor_v2.yaml
+  artifact_cache_size: 4
+
+h5:
+  output: outputs/relbench/rel-f1/dnf/routed.h5
+
+tfm:
+  rdbpfn_root: ../RDBPFN
+  checkpoint: ../RDBPFN/model_pretrain/checkpoints/RDBPFN_routed/model.pt
+  model_config: ../RDBPFN/model_pretrain/conf_train/RDBPFN_routed.yaml
+  predictions_output: outputs/relbench/rel-f1/dnf/tfm_eval/predictions.jsonl
+  metrics_output: outputs/relbench/rel-f1/dnf/tfm_eval/relbench_metrics.json
+
+runtime:
+  device: cuda
+  cuda_visible_devices: "5"
+  mixed_precision: bf16
+  overwrite: true
+  num_tasks: null
+  start_index: 0
+  progress_every: 1
+  progress_width: 28
+  log_level: INFO
+  log_file: null

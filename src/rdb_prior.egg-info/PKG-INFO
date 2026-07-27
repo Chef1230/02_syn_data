@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: rdb-prior
+Version: 0.1.0
+Summary: Role-aware synthetic relational schema generation
+Requires-Python: >=3.10
+Requires-Dist: h5py>=3.8
+Requires-Dist: numpy>=1.24
+Requires-Dist: PyYAML>=6.0
+Provides-Extra: router
+Requires-Dist: torch>=2.2; extra == "router"
+Provides-Extra: relbench
+Requires-Dist: relbench<3,>=2.1; extra == "relbench"
