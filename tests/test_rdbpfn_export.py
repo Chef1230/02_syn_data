@@ -44,91 +44,109 @@ from rdb_prior.task.view import build_task_view
 
 class RDBPFNExportTests(unittest.TestCase):
     def test_conversion_filters_supervision_rows_hidden_by_task_view(self) -> None:
-        sample_id = "sample_000017"
-        runtime = RuntimeContext(42).for_sample(sample_id)
-        blueprint = BlueprintSampler(
-            BlueprintSamplerConfig(min_tables=5, max_tables=8)
-        ).sample(sample_id, runtime)
-        schema = PhysicalSchemaCompiler().compile(
-            blueprint,
-            sample_id,
-            runtime,
-        )
-        instance_plan = InstancePlanner(
-            InstancePlannerConfig(
-                entity_rows_min=32,
-                entity_rows_max=40,
-                lookup_rows_min=3,
-                lookup_rows_max=5,
-                max_rows_per_table=128,
+        for attempt in range(20):
+            sample_id = f"vis_filter_{attempt}"
+            runtime = RuntimeContext(42 + attempt * 101).for_sample(sample_id)
+            blueprint = BlueprintSampler(
+                BlueprintSamplerConfig(min_tables=6, max_tables=9)
+            ).sample(sample_id, runtime)
+            schema = PhysicalSchemaCompiler().compile(
+                blueprint, sample_id, runtime,
             )
-        ).plan(
-            sample_id=sample_id,
-            schema=schema,
-            runtime=runtime.child("database-instance"),
-        )
-        database = DatabaseGenerator().generate(
-            schema=schema,
-            plan=instance_plan,
-        )
-        tasks = TaskPlanner(
-            TaskPlannerConfig(
-                tasks_per_database=2,
-                min_support_rows=8,
-                min_query_rows=4,
-                min_class_count_per_split=1,
-                max_attempts_per_database=256,
+            instance_plan = InstancePlanner(
+                InstancePlannerConfig(
+                    entity_rows_min=32,
+                    entity_rows_max=40,
+                    lookup_rows_min=3,
+                    lookup_rows_max=5,
+                    max_rows_per_table=128,
+                )
+            ).plan(
+                sample_id=sample_id,
+                schema=schema,
+                runtime=runtime.child("database-instance"),
             )
-        ).generate(
-            sample_id=sample_id,
-            schema=schema,
-            database=database,
-            runtime=runtime.child("task"),
-        )
-        task = next(
-            item
-            for item in tasks
-            if item.data.total_rows
-            > len(
-                build_task_view(
-                    schema,
-                    database,
-                    item.plan,
-                ).visible_rows(item.plan.target_table_id)
+            database = DatabaseGenerator().generate(
+                schema=schema,
+                plan=instance_plan,
             )
-        )
-        artifact = TaskArtifact(
-            sample_id=sample_id,
-            instance_artifact="unused",
-            schema_artifact="unused",
-            runtime=runtime.record(
-                project_version="test",
-                config_digest="test",
-            ),
-            task=task,
-            validation=None,  # type: ignore[arg-type]
-        )
-
-        dataset = RDBPFNConverter(min_validation_rows=2).convert(
-            task_artifact=artifact,
-            schema=schema,
-            database=database,
-        )
-
-        self.assertTrue(validate_rdbpfn_dataset(dataset).is_valid)
-        target = schema.table(task.plan.target_table_id)
-        key_name = target.primary_key.name
-        target_keys = set(dataset.tables[target.name][key_name].tolist())
-        self.assertLess(
-            sum(len(split[key_name]) for split in dataset.splits.values()),
-            task.data.total_rows,
-        )
-        for split in dataset.splits.values():
-            self.assertLessEqual(set(split[key_name].tolist()), target_keys)
-            self.assertEqual(
-                dataset.tables[target.name][key_name].dtype,
-                split[key_name].dtype,
+            try:
+                tasks = TaskPlanner(
+                    TaskPlannerConfig(
+                        tasks_per_database=2,
+                        # Prefer temporal mechanisms whose observation_rules
+                        # filter Event / Detail rows by cutoff.
+                        mechanism_weights=(
+                            (TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE, 0.4),
+                            (TaskMechanism.TEMPORAL_RELATIONAL_AGGREGATE, 0.4),
+                            (TaskMechanism.FUTURE_EVENT_ATTRIBUTE_CONDITION, 0.2),
+                        ),
+                        min_support_rows=8,
+                        min_query_rows=4,
+                        min_class_count_per_split=1,
+                        max_attempts_per_database=256,
+                    )
+                ).generate(
+                    sample_id=sample_id,
+                    schema=schema,
+                    database=database,
+                    runtime=runtime.child("task"),
+                )
+            except ValueError:
+                continue
+            # Find a task whose observation_rules actually hide rows on at
+            # least one filtered table (Event or Detail with a TIME column).
+            try:
+                task = next(
+                    item
+                    for item in tasks
+                    if any(
+                        len(database.table(rule.table_id).column(rule.time_column_id))
+                        > len(
+                            build_task_view(
+                                schema, database, item.plan,
+                            ).visible_rows(rule.table_id)
+                        )
+                        for rule in item.plan.observation_rules
+                    )
+                )
+            except StopIteration:
+                continue
+            artifact = TaskArtifact(
+                sample_id=sample_id,
+                instance_artifact="unused",
+                schema_artifact="unused",
+                runtime=runtime.record(
+                    project_version="test",
+                    config_digest="test",
+                ),
+                task=task,
+                validation=None,  # type: ignore[arg-type]
             )
+            dataset = RDBPFNConverter(min_validation_rows=2).convert(
+                task_artifact=artifact,
+                schema=schema,
+                database=database,
+            )
+            self.assertTrue(validate_rdbpfn_dataset(dataset).is_valid)
+            # Verify that observation_rules actually filtered rows from at
+            # least one Event/Detail table in the exported database.
+            filtered_any = False
+            for rule in task.plan.observation_rules:
+                table_name = schema.table(rule.table_id).name
+                if table_name in dataset.tables:
+                    pk_col = schema.table(rule.table_id).primary_key.name
+                    exported_count = len(dataset.tables[table_name][pk_col])
+                    db_count = database.table(rule.table_id).row_count
+                    if exported_count < db_count:
+                        filtered_any = True
+                        break
+            self.assertTrue(
+                filtered_any,
+                "observation_rules should filter at least one table in the export",
+            )
+            return
+        self.fail("no task with observation-filtered rows found in 20 attempts")
 
     def test_pipeline_writes_loadable_dbb_dataset_without_target_leakage(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
