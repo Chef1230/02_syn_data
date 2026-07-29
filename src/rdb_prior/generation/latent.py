@@ -217,7 +217,14 @@ def _gaussian_mixture_root_cause(
     """Mixture of 2–5 Gaussian components — introduces clustering structure
     into the latent space, common in SCMs with hidden confounders or
     sub-populations."""
-    component_count = int(rng.integers(2, min(6, rows // 4 + 1)))
+    max_components = min(5, rows // 4)
+    if max_components < 2:
+        # A mixture is not meaningful when there are fewer than four rows
+        # available per component.  Small lookup/child tables can legitimately
+        # reach this branch, so fall back to the single-Gaussian family rather
+        # than constructing an invalid rng.integers(2, <=2) interval.
+        return rng.normal(size=(rows, dims))
+    component_count = int(rng.integers(2, max_components + 1))
     # Component means spread apart.
     means = rng.normal(scale=float(np.exp(rng.uniform(0.0, 1.5))),
                        size=(component_count, dims))
