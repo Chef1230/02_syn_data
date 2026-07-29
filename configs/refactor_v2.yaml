@@ -36,6 +36,7 @@ schema:
   table_count_weights: [0.20, 0.12, 0.16, 0.14, 0.12, 0.10, 0.06, 0.03, 0.02, 0.02, 0.015, 0.005, 0.01]
 
   max_rank: 3
+  # Budget at max_tables; smaller schemas get a proportional share.
   max_extra_edges: 2
   extra_edge_probability: 0.35
   min_motif_occurrences: 1
@@ -47,6 +48,7 @@ motifs:
     entity_event: 1.0
     entity_event_detail: 1.4
     entity_bridge_collider: 1.0
+    entity_event_collider: 1.0
     entity_event_fork: 1.0
     event_reference_chain: 0.8
     lookup_assignment: 0.8

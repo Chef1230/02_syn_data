@@ -39,6 +39,8 @@ schema:
   max_rank: 3
 
   # Extra edges are sampled only from globally legal role/rank pairs.
+  # max_extra_edges is the budget at max_tables; smaller schemas receive a
+  # proportional share, so the edge count grows with the table count.
   max_extra_edges: 2
   extra_edge_probability: 0.35
 
@@ -55,6 +57,7 @@ motifs:
     entity_event: 1.0
     entity_event_detail: 1.4
     entity_bridge_collider: 1.0
+    entity_event_collider: 1.0
     entity_event_fork: 1.0
     event_reference_chain: 0.8
     lookup_assignment: 0.8

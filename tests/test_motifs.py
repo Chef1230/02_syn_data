@@ -40,7 +40,7 @@ def _issue_codes(motif: MotifSpec) -> set[str]:
 
 class MotifDefinitionTests(unittest.TestCase):
     def test_default_library_is_structurally_valid(self) -> None:
-        self.assertEqual(6, len(DEFAULT_MOTIF_LIBRARY))
+        self.assertEqual(7, len(DEFAULT_MOTIF_LIBRARY))
 
         for motif in DEFAULT_MOTIF_LIBRARY:
             with self.subTest(motif=motif.motif_type):

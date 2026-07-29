@@ -179,6 +179,7 @@ class MotifSpec:
         entity_event
         entity_event_detail
         entity_bridge_collider
+        entity_event_collider
         entity_event_fork
 
     It is not a generated natural-language description.
@@ -1056,6 +1057,41 @@ ENTITY_BRIDGE_COLLIDER = MotifSpec(
 )
 
 
+ENTITY_EVENT_COLLIDER = MotifSpec(
+    motif_type="entity_event_collider",
+    anchor_slot="entity_a",
+    nodes=(
+        MotifNodeSpec(
+            slot="entity_a",
+            roles=(TableRole.ENTITY,),
+            rank_offset=0,
+        ),
+        MotifNodeSpec(
+            slot="entity_b",
+            roles=(TableRole.ENTITY,),
+            rank_offset=0,
+        ),
+        MotifNodeSpec(
+            slot="event",
+            roles=(TableRole.EVENT,),
+            rank_offset=1,
+        ),
+    ),
+    edges=(
+        MotifEdgeSpec(
+            edge="entity_a_to_event",
+            parent_slot="entity_a",
+            child_slot="event",
+        ),
+        MotifEdgeSpec(
+            edge="entity_b_to_event",
+            parent_slot="entity_b",
+            child_slot="event",
+        ),
+    ),
+)
+
+
 ENTITY_EVENT_FORK = MotifSpec(
     motif_type="entity_event_fork",
     anchor_slot="entity",
@@ -1151,6 +1187,7 @@ DEFAULT_MOTIF_LIBRARY: Final[MotifLibrary] = MotifLibrary(
         ENTITY_EVENT,
         ENTITY_EVENT_DETAIL,
         ENTITY_BRIDGE_COLLIDER,
+        ENTITY_EVENT_COLLIDER,
         ENTITY_EVENT_FORK,
         EVENT_REFERENCE_CHAIN,
         LOOKUP_ASSIGNMENT,
@@ -1172,6 +1209,7 @@ __all__ = [
     "ENTITY_EVENT",
     "ENTITY_EVENT_DETAIL",
     "ENTITY_BRIDGE_COLLIDER",
+    "ENTITY_EVENT_COLLIDER",
     "ENTITY_EVENT_FORK",
     "EVENT_REFERENCE_CHAIN",
     "LOOKUP_ASSIGNMENT",

@@ -83,7 +83,7 @@ class SchemaConfigTests(unittest.TestCase):
         self.assertTrue(config.graph.write_dot)
         self.assertIsNone(config.graph.render_format)
         self.assertEqual(tuple(range(3, 16)), config.sampler.table_count_values)
-        self.assertEqual(6, len(config.sampler.motif_weights))
+        self.assertEqual(7, len(config.sampler.motif_weights))
         self.assertEqual(1, config.sampler.min_motif_occurrences)
         self.assertEqual(4, config.sampler.max_motif_occurrences)
         self.assertEqual(

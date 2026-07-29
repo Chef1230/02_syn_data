@@ -48,6 +48,7 @@ _DEFAULT_MOTIF_WEIGHTS: Final[tuple[tuple[str, float], ...]] = (
     ("entity_event", 1.0),
     ("entity_event_detail", 1.4),
     ("entity_bridge_collider", 1.0),
+    ("entity_event_collider", 1.0),
     ("entity_event_fork", 1.0),
     ("event_reference_chain", 0.8),
     ("lookup_assignment", 0.8),
@@ -659,6 +660,15 @@ class BlueprintSampler:
         if self.config.max_extra_edges == 0:
             return
 
+        # The budget scales with schema size: max_extra_edges is the cap at
+        # max_tables, and smaller schemas receive a proportional share (at
+        # least one candidate attempt) so edge density stays comparable.
+        budget = max(
+            1,
+            (len(nodes) * self.config.max_extra_edges)
+            // max(1, self.config.max_tables),
+        )
+
         existing_pairs = {
             (edge.parent_node_id, edge.child_node_id)
             for edge in edges
@@ -704,7 +714,7 @@ class BlueprintSampler:
         rng.shuffle(candidates)
         added = 0
         for parent, child in candidates:
-            if added >= self.config.max_extra_edges:
+            if added >= budget:
                 break
             if rng.random() > self.config.extra_edge_probability:
                 continue
