@@ -165,7 +165,6 @@ def future_event_candidates(schema: PhysicalSchema) -> tuple[FutureEventCandidat
             parent.role is TableRole.ENTITY
             and child.role is TableRole.EVENT
             and time_column is not None
-            and _has_incoming_fk(schema, parent.table_id)
         ):
             result.append(
                 FutureEventCandidate(
