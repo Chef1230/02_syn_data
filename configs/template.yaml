@@ -1,0 +1,363 @@
+# =============================================================================
+# 默认配置模板 / 回退层 (fallback defaults for every pipeline config)
+# =============================================================================
+#
+# 本文件不是直接运行的配置, 而是所有配置的默认底座:
+#
+#   load_*_pipeline_config(your.yaml)
+#       = deep_merge(template.yaml, your.yaml)
+#
+# 规则:
+#   - your.yaml 中出现的字段覆盖本文件的同名字段 (嵌套字典逐键合并;
+#     列表与标量整体替换; 显式 null 也算覆盖);
+#   - your.yaml 中缺失的字段 (或缺失的整段) 使用本文件的值;
+#   - 本文件的值与代码 dataclass 默认值保持一致, 因此已有的完整配置
+#     (refactor_v1.yaml / refactor_v2.yaml / configs/local/*) 加载行为不变;
+#   - 想全局调整某个分布, 直接改本文件; 想单次运行调整, 改运行配置。
+#
+# 模板位置: <项目根>/configs/template.yaml;
+# 可用环境变量 RDB_PRIOR_CONFIG_TEMPLATE 指向其他文件, 设为空字符串关闭合并。
+#
+# 硬性结构不变量 (连通性、FK DAG、rank 顺序、role 边合法性、Entity/Event
+# 必须存在、Bridge 父节点数等) 不可配置, 不出现在本文件中。
+# =============================================================================
+
+# 文件格式版本, 当前 loader 仅支持 1。
+config_version: 1
+
+# 全局随机种子; 所有阶段的 RNG 均由它派生。
+seed: 42
+
+paths:
+  # 各阶段输出目录由此派生: <output_root>/{schema,instance,task,rdbpfn,router,routed}/。
+  # 相对路径以项目根目录 (02_syn_data) 为基准。
+  output_root: outputs/my_run
+
+# -----------------------------------------------------------------------------
+# Stage 01a: schema 生成运行参数
+# -----------------------------------------------------------------------------
+generation:
+  num_schemas: 100               # <== 分布参数: 生成的 schema 总数
+  start_index: 0
+  sample_id_prefix: sample
+  progress_every: 100
+  overwrite: false
+  project_version: schema-pipeline-v1
+
+# Stage 01 诊断图产物。DOT 无外部依赖; 安装 Graphviz 后可设 png/svg/pdf。
+schema_graph:
+  write_dot: true
+  render_format: null
+  graphviz_command: dot
+  include_columns: true
+  include_role_metadata: true
+
+# -----------------------------------------------------------------------------
+# Stage 01b: 逻辑 schema (blueprint) 分布
+# -----------------------------------------------------------------------------
+schema:
+  blueprint_id_prefix: blueprint
+
+  min_tables: 3                  # <== 分布参数: 表数下界 (>= 3)
+  max_tables: 12                 # <== 分布参数: 表数上界
+
+  # <== 分布参数: 表数先验。两者默认留空 => 在 [min_tables, max_tables]
+  # 上均匀采样。需要加权先验时取消注释 (两个列表必须等长, 权重无需归一化):
+  # table_count_values: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  # table_count_weights: [0.20, 0.16, 0.14, 0.12, 0.10, 0.09, 0.07, 0.05, 0.04, 0.03]
+
+  # FK 边必须满足 parent.rank < child.rank; max_rank 限制最长依赖链。
+  max_rank: 3                    # <== 分布参数 (>= 1)
+
+  # 额外边 (motif 之外的合法 role/rank 边):
+  # max_extra_edges 是表数达到 max_tables 时的预算上限, 较小 schema 按
+  # len(nodes)/max_tables 线性缩减 (至少 1), 即额外边数随表数增长。
+  max_extra_edges: 2             # <== 分布参数 (>= 0; 0 关闭额外边)
+  extra_edge_probability: 0.35   # <== 分布参数: 每条候选边的接受概率 [0, 1]
+
+  # motif 出现次数在 [min, max] 内采样; 其余表用 role-aware 背景挂载。
+  min_motif_occurrences: 1       # <== 分布参数 (>= 1)
+  max_motif_occurrences: 4       # <== 分布参数 (>= min)
+  background_attachment_probability: 0.35  # <== 分布参数 [0, 1]
+
+motifs:
+  # <== 分布参数: 结构 motif 的采样权重。权重 > 0 即启用; 未知名字会被拒绝。
+  # 可用 motif:
+  #   entity_event           entity -> event
+  #   entity_event_detail    entity -> event -> detail
+  #   entity_bridge_collider entity_A -> bridge <- entity_B
+  #   entity_event_collider  entity_A -> event  <- entity_B
+  #   entity_event_fork      entity -> event_A, entity -> event_B
+  #   event_reference_chain  event -> event
+  #   lookup_assignment      lookup -> (entity|event|bridge|detail)
+  weights:
+    entity_event: 1.0
+    entity_event_detail: 1.4
+    entity_bridge_collider: 1.0
+    entity_event_collider: 1.0
+    entity_event_fork: 1.0
+    event_reference_chain: 0.8
+    lookup_assignment: 0.8
+
+# -----------------------------------------------------------------------------
+# Stage 01c: 物理设计 (列分布)
+# -----------------------------------------------------------------------------
+physical_design:
+  schema_id_prefix: schema
+
+  # <== 分布参数: 无其他规则命中时的兜底特征列数。
+  min_feature_columns: 2
+  max_feature_columns: 6
+  # <== 分布参数: 列级可空概率 [0, 1]。
+  feature_nullable_probability: 0.15
+  primary_key_names: [id, pk_id, row_id]
+
+  # <== 分布参数: 按表数分段的列数先验, 区间不得重叠。默认空 => 全部走
+  # 上面的兜底列数。需要分段先验时取消注释:
+  # feature_columns_by_table_count:
+  #   - {table_count_min: 3,  table_count_max: 5,  min_columns: 6, max_columns: 15}
+  #   - {table_count_min: 6,  table_count_max: 8,  min_columns: 4, max_columns: 10}
+  #   - {table_count_min: 9,  table_count_max: 12, min_columns: 3, max_columns: 8}
+
+  # <== 分布参数: 按 role 覆盖列数 (优先于表数规则)。
+  # 合法 key: entity / event / lookup / bridge / detail。
+  # 示例: entity: {min_columns: 4, max_columns: 10}
+  feature_columns_by_role: {}
+
+# -----------------------------------------------------------------------------
+# Stage 02a: 数据库实例的行数与特征分布
+# -----------------------------------------------------------------------------
+instance:
+  # --- 行数分布 -----------------------------------------------------------
+  # <== 分布参数: entity 行数。distribution 可选 uniform / loguniform(默认) /
+  # lognormal; lognormal 时 median 与 log_sigma 控制重尾形状, loguniform 时
+  # 在 [min, max] 的对数空间均匀采样。
+  entity_rows_min: 128
+  entity_rows_max: 512
+  entity_rows_distribution: loguniform
+  entity_rows_median: 256
+  entity_rows_log_sigma: 0.8
+
+  # <== 分布参数: lookup 行数 (uniform / loguniform)。
+  lookup_rows_min: 4
+  lookup_rows_max: 32
+  lookup_rows_distribution: uniform
+
+  # <== 分布参数: 相对父表的扇出/缩放因子区间 (均匀采样)。
+  event_fanout_min: 0.75         # event 行数 = entity 行数 × U(min, max)
+  event_fanout_max: 4.0
+  bridge_rows_factor_min: 0.5
+  bridge_rows_factor_max: 2.0
+  detail_fanout_min: 0.75
+  detail_fanout_max: 4.0
+  entity_child_factor_min: 0.5   # entity 子表 (entity->entity) 缩放
+  entity_child_factor_max: 1.5
+
+  # <== 分布参数: 全库规模乘数分布 (uniform / lognormal;
+  # lognormal 时 log_sigma 控制库间差异)。
+  population_scale_distribution: uniform
+  population_scale_log_sigma: 0.8
+
+  max_rows_per_table: 2048       # 硬上限, 保护生成成本
+
+  # --- FK 选择 / 隐变量 ----------------------------------------------------
+  latent_dimension: 4            # <== 分布参数: 共享隐空间维度
+  optional_rate_min: 0.05        # <== 分布参数: 可空 FK 的置空率区间
+  optional_rate_max: 0.25
+  affinity_strength: 1.0         # <== 分布参数: 隐变量亲和对 FK 分配的强度
+  degree_strength: 0.8           # <== 分布参数: 度数偏好强度
+
+  # --- 特征 SCM 分布 --------------------------------------------------------
+  # <== 分布参数: 四种结构因果机制的采样权重 (无需归一化)。
+  scm_weights:
+    exogenous: 0.30              # 纯噪声
+    linear: 0.40                 # 线性
+    cam: 0.20                    # 加性噪声
+    mlp: 0.10                    # 神经网络
+
+  # <== 分布参数: 根因隐变量族 (外生噪声的形状) 的采样权重。
+  root_cause_weights:
+    standard_normal: 0.30
+    linear: 0.20
+    nonlinear: 0.20
+    lognormal: 0.15
+    gaussian_mixture: 0.15
+
+  # <== 分布参数: MLP 结构先验。按库采样一次, 每个 MLP 表再各自实现。
+  mlp_depth_min: 1
+  mlp_depth_max: 4
+  mlp_hidden_factor_min: 0.5     # 隐层宽度 = 输入维度 × U(min, max)
+  mlp_hidden_factor_max: 4.0
+  mlp_dropout_probability: 0.6   # 使用 dropout 的 MLP 比例
+  mlp_dropout_rate_min: 0.05
+  mlp_dropout_rate_max: 0.4
+
+  # <== 分布参数: 层级 SCM 先验。库级先采 meta 超参, 表级再条件采样。
+  feature_noise_scale_min: 0.0001
+  feature_noise_scale_max: 0.3
+  scm_signal_scale_min: 0.01
+  scm_signal_scale_max: 10.0
+  scm_meta_relative_std_min: 0.01
+  scm_meta_relative_std_max: 1.0
+  scm_activation_scale_min: 0.1
+  scm_activation_scale_max: 100.0
+  scm_output_scale_log_std: 1.4
+  scm_long_tail_probability: 0.5  # 长尾输出的概率
+  scm_long_tail_alpha_min: 1.1    # Pareto alpha 区间 (越小尾越重)
+  scm_long_tail_alpha_max: 2.0
+
+  # <== 分布参数: 缺失率。zero_probability 为缺失率直接取 0 的概率,
+  # 非零部分按 Beta(alpha, beta) × max 采样 (alpha=beta=1 即均匀)。
+  feature_missing_rate_min: 0.02
+  feature_missing_rate_max: 0.15
+  feature_missing_zero_probability: 0.0
+  feature_missing_beta_alpha: 1.0
+  feature_missing_beta_beta: 1.0
+
+  # <== 分布参数: 类别列基数。high_cardinality_probability 概率抽到高基数档。
+  categorical_cardinality_min: 3
+  categorical_cardinality_max: 12
+  categorical_high_cardinality_probability: 0.0
+  categorical_high_cardinality_min: 13
+  categorical_high_cardinality_max: 256
+
+  # <== 分布参数: 事件时间尺度 (秒)。300 = 5 分钟, 86400 = 1 天。
+  time_scale_seconds_min: 300.0
+  time_scale_seconds_max: 86400.0
+
+# Stage 02 运行参数
+instance_generation:
+  count: null                    # null = 消费 start_index 之后的全部 schema
+  start_index: 0
+  shard_id: 0                    # 多机分片: shard_id / num_shards
+  num_shards: 1
+  num_workers: 1                 # 进程级并行, 一个 worker 一个库
+  progress_every: 100
+  overwrite: false
+  project_version: instance-pipeline-v1
+
+# -----------------------------------------------------------------------------
+# Stage 03: 监督任务分布
+# -----------------------------------------------------------------------------
+task:
+  tasks_per_database: 2          # <== 分布参数: 每个库的确切任务数
+
+  # <== 分布参数: 任务机制权重 (无需归一化; 候选池为空的机制自动跳过)。
+  mechanism_weights:
+    relation_attribute: 0.35
+    entity_future_event_existence: 0.25
+    future_event_attribute_condition: 0.20
+    temporal_relational_aggregate: 0.20
+
+  # <== 分布参数: support/query 划分。
+  support_fraction: 0.70         # (0, 1)
+  min_support_rows: 32
+  min_query_rows: 16
+  min_class_count_per_split: 2   # 每个划分中每类最少行数
+  max_classification_categories: 12
+
+  # <== 分布参数: 未来事件标签用 (cutoff, cutoff + horizon] 内的事件。
+  cutoff_quantile_min: 0.45      # cutoff 取事件时间的分位数区间
+  cutoff_quantile_max: 0.70
+  horizon_fraction_min: 0.12     # horizon 占时间跨度的比例区间
+  horizon_fraction_max: 0.30
+  positive_rate_min: 0.20        # 目标正例率采样区间
+  positive_rate_max: 0.80
+
+  max_attempts_per_database: 128
+  require_full_task_count: true  # 凑不齐 tasks_per_database 时报错
+
+# Stage 03 运行参数
+task_generation:
+  database_count: null           # null = 消费全部 instance
+  start_index: 0
+  shard_id: 0
+  num_shards: 1
+  progress_every: 100
+  overwrite: false
+  project_version: task-pipeline-v1
+
+# -----------------------------------------------------------------------------
+# Stage 04: 导出 DBB 数据集 (+ 可选 DFS/H5)
+# -----------------------------------------------------------------------------
+rdbpfn_export:
+  task_count: null               # null = 消费全部 task
+  start_index: 0
+  shard_id: 0
+  num_shards: 1
+
+  validation_fraction: 0.20      # <== 分布参数: 验证集比例
+  min_validation_rows: 8
+  compress: true
+  progress_every: 100
+  overwrite: false
+  project_version: rdbpfn-export-v1
+
+  # --- 可选: DFS 预处理 + H5 打包 (依赖 ../RDBPFN) -------------------------
+  h5_enabled: false              # true 时在 DBB 导出后执行 H5 分支
+  h5_output: null                # null => <output_root>/rdbpfn/rdbpfn_tasks.h5
+  rdbpfn_preprocessing_root: ../RDBPFN/data_preprocessing
+  h5_run_dfs: true               # false = 仅打包已有 rdbpfn-processed 目录
+  dfs_depth: 1
+  dfs_jobs: 4
+  h5_total_rows: 600
+  h5_max_columns: 60
+  h5_seed: 42
+
+# -----------------------------------------------------------------------------
+# 可选: 路径路由器训练
+# -----------------------------------------------------------------------------
+path_router:
+  max_path_depth: 2
+  max_candidates: 20
+  top_k_paths: 3
+  max_source_columns: 8
+  min_rows_per_hop: 16
+  rows_per_hop: 32
+  max_target_columns: 32
+  max_rows_per_task: 600
+
+  token_dim: 64
+  type_embedding_dim: 16
+  path_feature_dim: 8
+  column_feature_dim: 8
+  router_hidden_dim: 128
+  transformer_heads: 4
+  transformer_layers: 2
+  dropout: 0.10
+  max_classes: 16
+  aggregation: set
+  temperature: 1.0
+
+  epochs: 10
+  batch_size: 1
+  num_workers: 0
+  prefetch_factor: 2
+  artifact_cache_size: 16
+  mixed_precision: none          # none / bf16 / fp16
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  validation_fraction: 0.10
+  task_count: null
+  start_index: 0
+  seed: 42
+  device: auto                   # auto / cpu / cuda
+  lambda_route: 1.0
+  lambda_cost: 0.05
+  lambda_sparse: 0.05
+  lambda_diversity: 0.05
+  overwrite: false
+  progress_every: 50
+
+# -----------------------------------------------------------------------------
+# 可选: 用训练好的路由器条件化导出 H5
+# -----------------------------------------------------------------------------
+routed_h5:
+  # checkpoint / output_path 缺省时分别派生为
+  # <output_root>/router/checkpoints/best.pt 与
+  # <output_root>/routed/routed_tasks.h5。
+  task_count: null
+  start_index: 0
+  device: auto
+  overwrite: false

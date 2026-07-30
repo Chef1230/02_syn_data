@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 try:
     import yaml
@@ -19,7 +20,7 @@ from rdb_prior.compilation.compiler import (
     TableCountFeatureRule,
 )
 from rdb_prior.export.pipeline import RDBPFNExportConfig
-from rdb_prior.instance.plan import FeatureSCMFamily
+from rdb_prior.instance.plan import FeatureSCMFamily, RootCauseFamily
 from rdb_prior.instance.planner import InstancePlannerConfig
 from rdb_prior.pipeline import InstancePipelineConfig, SchemaPipelineConfig
 from rdb_prior.routing.config import (
@@ -690,20 +691,19 @@ def load_instance_pipeline_config(
         raise TypeError("overrides must be InstanceConfigOverrides or None")
     defaults = InstancePlannerConfig()
 
-    raw_weights = instance.get("scm_weights")
-    if raw_weights is None:
-        scm_weights = defaults.scm_weights
-    else:
-        weights = _mapping(raw_weights, "config.instance.scm_weights")
-        try:
-            scm_weights = tuple(
-                (FeatureSCMFamily(name), float(weight))
-                for name, weight in sorted(weights.items())
-            )
-        except (TypeError, ValueError) as error:
-            raise SchemaConfigError(
-                f"Invalid config.instance.scm_weights: {error}"
-            ) from error
+    scm_weights = _weight_mapping(
+        instance.get("scm_weights"),
+        defaults.scm_weights,
+        FeatureSCMFamily,
+        "config.instance.scm_weights",
+        sort_keys=True,
+    )
+    root_cause_weights = _weight_mapping(
+        instance.get("root_cause_weights"),
+        defaults.root_cause_weights,
+        RootCauseFamily,
+        "config.instance.root_cause_weights",
+    )
 
     schema_output = _stage_output_path(paths, "schema")
     schema_manifest_value = _stage_manifest_path(
@@ -717,11 +717,12 @@ def load_instance_pipeline_config(
         planner_values = {
             name: instance.get(name, getattr(defaults, name))
             for name in defaults.__dataclass_fields__
-            if name != "scm_weights"
+            if name not in {"scm_weights", "root_cause_weights"}
         }
         planner = InstancePlannerConfig(
             **planner_values,
             scm_weights=scm_weights,
+            root_cause_weights=root_cause_weights,
         )
         return InstancePipelineConfig(
             schema_manifest=_resolve_output_root(
@@ -1126,7 +1127,85 @@ def load_routed_h5_config(
         ) from error
 
 
+def _weight_mapping(
+    raw: Any,
+    default: tuple[tuple[Any, float], ...],
+    family: type,
+    path: str,
+    *,
+    sort_keys: bool = False,
+) -> tuple[tuple[Any, float], ...]:
+    """Parse a ``{family_name: weight}`` YAML mapping into enum-weight pairs.
+
+    ``sort_keys=True`` preserves the historical alphabetical ordering used
+    by scm_weights; otherwise YAML insertion order is kept so a template can
+    mirror the dataclass default ordering exactly.
+    """
+    if raw is None:
+        return default
+    weights = _mapping(raw, path)
+    items = sorted(weights.items()) if sort_keys else weights.items()
+    try:
+        return tuple((family(name), float(weight)) for name, weight in items)
+    except (TypeError, ValueError) as error:
+        raise SchemaConfigError(f"Invalid {path}: {error}") from error
+
+
+# Project-wide default template. Every loaded config is deep-merged on top
+# of this base: fields present in the requested file win, missing fields
+# fall back to the template values.
+_DEFAULT_CONFIG_TEMPLATE: Final[Path] = (
+    Path(__file__).resolve().parents[2] / "configs" / "template.yaml"
+)
+
+
 def _load_document(path: Path) -> Any:
+    document = _read_config_file(path)
+    template_path = _resolve_config_template(path)
+    if template_path is None:
+        return document
+    base = _read_config_file(template_path)
+    if not isinstance(base, Mapping) or not isinstance(document, Mapping):
+        return document
+    return _deep_merge(dict(base), dict(document))
+
+
+def _resolve_config_template(path: Path) -> Path | None:
+    """Locate the fallback template for *path*, or None to skip merging.
+
+    The environment variable ``RDB_PRIOR_CONFIG_TEMPLATE`` overrides the
+    default location; set it to an empty string to disable merging.
+    """
+    override = os.environ.get("RDB_PRIOR_CONFIG_TEMPLATE")
+    if override is not None:
+        if not override.strip():
+            return None
+        candidate = Path(override).expanduser().resolve()
+    else:
+        candidate = _DEFAULT_CONFIG_TEMPLATE
+    if candidate == path or not candidate.is_file():
+        return None
+    return candidate
+
+
+def _deep_merge(base: Any, override: Any) -> Any:
+    """Merge *override* onto *base*.
+
+    Nested mappings merge recursively; every other value (scalars and
+    lists alike) is replaced wholesale by the override, including explicit
+    nulls.
+    """
+    if isinstance(base, Mapping) and isinstance(override, Mapping):
+        merged: dict[Any, Any] = dict(base)
+        for key, value in override.items():
+            merged[key] = (
+                _deep_merge(base[key], value) if key in base else value
+            )
+        return merged
+    return override
+
+
+def _read_config_file(path: Path) -> Any:
     if not path.is_file():
         raise SchemaConfigError(f"Config file does not exist: {path}")
     try:

@@ -362,5 +362,74 @@ class SchemaConfigTests(unittest.TestCase):
         )
 
 
+class TemplateFallbackTests(unittest.TestCase):
+    """Configs deep-merge over configs/template.yaml as fallback defaults."""
+
+    def _write_minimal_config(self, directory: Path) -> Path:
+        config_path = directory / "minimal.yaml"
+        config_path.write_text(
+            "paths:\n"
+            "  output_root: outputs/merge_probe\n"
+            "schema:\n"
+            "  max_tables: 9\n",
+            encoding="utf-8",
+        )
+        return config_path
+
+    def test_explicit_field_wins_and_missing_fields_fall_back(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config = load_schema_pipeline_config(
+                self._write_minimal_config(Path(temporary_directory))
+            )
+
+        self.assertEqual(9, config.sampler.max_tables)
+        # Missing fields and whole missing sections come from the template.
+        template = load_schema_pipeline_config(
+            PROJECT_ROOT / "configs" / "template.yaml"
+        )
+        self.assertEqual(
+            template.sampler.min_tables, config.sampler.min_tables
+        )
+        self.assertEqual(template.num_schemas, config.num_schemas)
+        self.assertEqual(
+            template.sampler.motif_weights, config.sampler.motif_weights
+        )
+
+    def test_merging_can_be_disabled_via_environment(self) -> None:
+        import os
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = self._write_minimal_config(Path(temporary_directory))
+            os.environ["RDB_PRIOR_CONFIG_TEMPLATE"] = ""
+            try:
+                config = load_schema_pipeline_config(config_path)
+            finally:
+                del os.environ["RDB_PRIOR_CONFIG_TEMPLATE"]
+
+        # Without the template, loader-level code defaults apply instead.
+        self.assertEqual(9, config.sampler.max_tables)
+        self.assertEqual(100, config.num_schemas)
+        self.assertEqual(
+            (("entity_event", 1.0),),
+            tuple(config.sampler.motif_weights[:1]),
+        )
+
+    def test_complete_presets_are_unaffected_by_merge(self) -> None:
+        import dataclasses
+        import os
+
+        preset = PROJECT_ROOT / "configs" / "refactor_v2.yaml"
+        merged = load_schema_pipeline_config(preset)
+        os.environ["RDB_PRIOR_CONFIG_TEMPLATE"] = ""
+        try:
+            bare = load_schema_pipeline_config(preset)
+        finally:
+            del os.environ["RDB_PRIOR_CONFIG_TEMPLATE"]
+
+        self.assertEqual(
+            dataclasses.asdict(bare), dataclasses.asdict(merged)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
