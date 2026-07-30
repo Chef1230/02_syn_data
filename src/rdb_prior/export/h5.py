@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import logging
+import os
 from pathlib import Path
 import subprocess
 from typing import Any, Callable, Mapping
@@ -85,16 +86,37 @@ def run_rdbpfn_dfs(
             processed_root,
         )
     _LOGGER.info(
-        "starting RDBPFN DFS: depth=%d jobs=%d input=%s",
+        "starting RDBPFN DFS: depth=%d jobs=%d input=%s (suppressing subprocess logs)",
         depth,
         jobs,
         raw_root,
     )
-    subprocess.run(
+    env = os.environ.copy()
+    # RDBPFN preprocessing scripts use LOG_CFG / LOG_LEVEL for their own
+    # logger; silence INFO and DEBUG so only warnings and errors surface.
+    env["LOG_LEVEL"] = "WARNING"
+    env["LOG_CFG"] = "WARNING"
+    result = subprocess.run(
         [bash_command, str(script), str(raw_root), str(jobs)],
         cwd=preprocessing_root,
-        check=True,
+        check=False,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
     )
+    if result.returncode != 0:
+        _LOGGER.error(
+            "RDBPFN DFS failed (exit %d):\n%s",
+            result.returncode,
+            result.stderr.strip() or "(no stderr)",
+        )
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            [bash_command, str(script), str(raw_root), str(jobs)],
+            output=None,
+            stderr=result.stderr,
+        )
     if not processed_root.is_dir():
         raise RuntimeError(
             f"RDBPFN DFS completed without creating {processed_root}"
