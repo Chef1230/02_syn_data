@@ -183,6 +183,79 @@ class TaskGenerationTests(unittest.TestCase):
             return
         self.fail("no balanced future-event task found in 20 databases")
 
+    def test_history_gated_future_activity_gates_on_prior_events(self) -> None:
+        planner = TaskPlanner(
+            TaskPlannerConfig(
+                tasks_per_database=1,
+                mechanism_weights=(
+                    (TaskMechanism.HISTORY_GATED_FUTURE_ACTIVITY, 1.0),
+                ),
+                min_support_rows=8,
+                min_query_rows=4,
+                min_class_count_per_split=1,
+                max_attempts_per_database=512,
+            )
+        )
+        for index in range(40):
+            sample_id = f"history_gated_task_{index}"
+            runtime, schema, database = self._database(
+                sample_id, min_tables=5, max_tables=7
+            )
+            try:
+                tasks = planner.generate(
+                    sample_id=sample_id,
+                    schema=schema,
+                    database=database,
+                    runtime=runtime.child("task"),
+                )
+            except ValueError:
+                continue
+            task = tasks[0]
+            plan = task.plan
+
+            # Recompute the label from raw event rows: 1 iff the entity has
+            # at least one event at or before the cutoff and none within
+            # (cutoff, horizon].
+            fk = next(
+                foreign_key
+                for foreign_key in schema.foreign_keys
+                if foreign_key.foreign_key_id == plan.foreign_key_id
+            )
+            event = database.table(plan.source_table_id)
+            times = event.column(plan.time_column_id or "")
+            assignments = event.column(fk.child_column_id)
+            entity_count = database.table(plan.target_table_id).row_count
+            valid = assignments >= 0
+            has_history = np.zeros(entity_count, dtype=bool)
+            has_future = np.zeros(entity_count, dtype=bool)
+            has_history[
+                np.unique(assignments[valid & (times <= plan.cutoff_time)])
+            ] = True
+            has_future[np.unique(assignments[
+                valid
+                & (times > plan.cutoff_time)
+                & (times <= plan.horizon_end_time)
+            ])] = True
+            expected = (has_history & ~has_future).astype(np.int8)
+
+            np.testing.assert_array_equal(
+                task.data.support_labels,
+                expected[task.data.support_row_ids],
+            )
+            np.testing.assert_array_equal(
+                task.data.query_labels,
+                expected[task.data.query_row_ids],
+            )
+            np.testing.assert_array_equal(
+                expected, mechanism_labels(schema, database, plan)
+            )
+            # Both classes must occur: labels are gated on having history.
+            self.assertEqual({0, 1}, set(expected.tolist()))
+            self.assertTrue(np.any(has_history))
+            self.assertTrue(validate_task(schema, database, task).is_valid)
+            return
+        self.fail("no balanced history-gated task found in 40 databases")
+
     def test_full_task_pipeline_honors_tasks_per_database(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

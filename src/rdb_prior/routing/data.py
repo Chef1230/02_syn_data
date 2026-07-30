@@ -905,7 +905,10 @@ def _route_supervision(
 ) -> tuple[np.ndarray, np.ndarray]:
     plan = raw.task_artifact.task.plan
     roles = {label.foreign_key_ids: label.role for label in plan.route_supervision}
-    if not roles and plan.mechanism is TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE:
+    if not roles and plan.mechanism in {
+        TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE,
+        TaskMechanism.HISTORY_GATED_FUTURE_ACTIVITY,
+    }:
         if plan.foreign_key_id is not None:
             roles[(plan.foreign_key_id,)] = RouteRole.REQUIRED
     target_map = {

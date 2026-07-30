@@ -147,7 +147,10 @@ def validate_task(
     issues.extend(_validate_mechanism_labels(schema, database, task))
     if plan.mechanism is TaskMechanism.RELATION_ATTRIBUTE:
         issues.extend(_validate_relation_attribute(schema, task))
-    if plan.mechanism is TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE:
+    if plan.mechanism in {
+        TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE,
+        TaskMechanism.HISTORY_GATED_FUTURE_ACTIVITY,
+    }:
         issues.extend(_validate_future_visibility(schema, task))
     return TaskValidationReport(task_id=plan.task_id, issues=tuple(issues))
 

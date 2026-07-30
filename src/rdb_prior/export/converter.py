@@ -303,7 +303,10 @@ class RDBPFNConverter:
                     plan.prediction_type,
                 ),
             }
-            if plan.mechanism is TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE:
+            if plan.mechanism in {
+                TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE,
+                TaskMechanism.HISTORY_GATED_FUTURE_ACTIVITY,
+            }:
                 cutoff = np.full(len(rows), int(plan.cutoff_time), dtype=np.int64)
                 columns[_CUTOFF_COLUMN] = _seconds_to_datetime(cutoff)
             elif plan.cutoff_time is not None and target_times is not None:

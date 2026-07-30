@@ -173,6 +173,7 @@ task:
   mechanism_weights:
     relation_attribute: 0.35
     entity_future_event_existence: 0.25
+    history_gated_future_activity: 0.15
     future_event_attribute_condition: 0.20
     temporal_relational_aggregate: 0.20
 

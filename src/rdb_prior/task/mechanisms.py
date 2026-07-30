@@ -9,6 +9,7 @@ export layer can always emit ``row_id | label | cutoff_time``.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -340,6 +341,65 @@ def build_future_event_existence_task(
     horizon_fraction_min: float, horizon_fraction_max: float,
     positive_rate_min: float = 0.15, positive_rate_max: float = 0.65,
 ) -> PlannedTask | None:
+    return _build_entity_future_horizon_task(
+        task_id=task_id, sample_id=sample_id, schema=schema,
+        database=database, candidate=candidate, seed=seed,
+        support_fraction=support_fraction, min_support_rows=min_support_rows,
+        min_query_rows=min_query_rows,
+        min_class_count_per_split=min_class_count_per_split,
+        cutoff_quantile_min=cutoff_quantile_min,
+        cutoff_quantile_max=cutoff_quantile_max,
+        horizon_fraction_min=horizon_fraction_min,
+        horizon_fraction_max=horizon_fraction_max,
+        positive_rate_min=positive_rate_min,
+        positive_rate_max=positive_rate_max,
+        mechanism=TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE,
+        label_values=_future_existence_values,
+    )
+
+
+def build_history_gated_future_activity_task(
+    *, task_id: str, sample_id: str, schema: PhysicalSchema,
+    database: DatabaseInstance, candidate: FutureEventCandidate,
+    seed: int, support_fraction: float, min_support_rows: int,
+    min_query_rows: int, min_class_count_per_split: int,
+    cutoff_quantile_min: float, cutoff_quantile_max: float,
+    horizon_fraction_min: float, horizon_fraction_max: float,
+    positive_rate_min: float = 0.15, positive_rate_max: float = 0.65,
+) -> PlannedTask | None:
+    """Positive label: the entity has events at or before the cutoff but
+    produces no events within (cutoff, horizon]."""
+    return _build_entity_future_horizon_task(
+        task_id=task_id, sample_id=sample_id, schema=schema,
+        database=database, candidate=candidate, seed=seed,
+        support_fraction=support_fraction, min_support_rows=min_support_rows,
+        min_query_rows=min_query_rows,
+        min_class_count_per_split=min_class_count_per_split,
+        cutoff_quantile_min=cutoff_quantile_min,
+        cutoff_quantile_max=cutoff_quantile_max,
+        horizon_fraction_min=horizon_fraction_min,
+        horizon_fraction_max=horizon_fraction_max,
+        positive_rate_min=positive_rate_min,
+        positive_rate_max=positive_rate_max,
+        mechanism=TaskMechanism.HISTORY_GATED_FUTURE_ACTIVITY,
+        label_values=_history_gated_values,
+    )
+
+
+def _build_entity_future_horizon_task(
+    *, task_id: str, sample_id: str, schema: PhysicalSchema,
+    database: DatabaseInstance, candidate: FutureEventCandidate,
+    seed: int, support_fraction: float, min_support_rows: int,
+    min_query_rows: int, min_class_count_per_split: int,
+    cutoff_quantile_min: float, cutoff_quantile_max: float,
+    horizon_fraction_min: float, horizon_fraction_max: float,
+    positive_rate_min: float, positive_rate_max: float,
+    mechanism: TaskMechanism,
+    label_values: Callable[
+        [PhysicalSchema, DatabaseInstance, FutureEventCandidate, int, int],
+        np.ndarray,
+    ],
+) -> PlannedTask | None:
     rng = _rng(seed)
     event = database.table(candidate.event_table_id)
     times = event.column(candidate.time_column_id)
@@ -356,7 +416,7 @@ def build_future_event_existence_task(
     best: tuple[float, int, np.ndarray] | None = None
     for horizon in horizon_candidates:
         plan_stub = (cutoff, int(horizon))
-        labels = _future_existence_values(schema, database, candidate, *plan_stub)
+        labels = label_values(schema, database, candidate, *plan_stub)
         item = (abs(float(np.mean(labels)) - desired), int(horizon), labels)
         if best is None or item[0] < best[0]:
             best = item
@@ -373,7 +433,7 @@ def build_future_event_existence_task(
     plan = TaskPlan(
         task_id=task_id, sample_id=sample_id, instance_id=database.instance_id,
         schema_id=schema.schema_id,
-        mechanism=TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE,
+        mechanism=mechanism,
         prediction_type=PredictionType.CLASSIFICATION,
         target_table_id=candidate.entity_table_id,
         source_table_id=candidate.event_table_id,
@@ -523,14 +583,22 @@ def mechanism_labels(
         label.foreign_key_ids for label in plan.route_supervision
         if label.role is RouteRole.REQUIRED
     )
-    if plan.mechanism is TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE:
+    if plan.mechanism in {
+        TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE,
+        TaskMechanism.HISTORY_GATED_FUTURE_ACTIVITY,
+    }:
         candidate = FutureEventCandidate(
             foreign_key_id=plan.foreign_key_id or "",
             entity_table_id=plan.target_table_id,
             event_table_id=plan.source_table_id,
             time_column_id=plan.time_column_id or "",
         )
-        return _future_existence_values(
+        values = (
+            _future_existence_values
+            if plan.mechanism is TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE
+            else _history_gated_values
+        )
+        return values(
             schema, database, candidate, int(plan.cutoff_time), int(plan.horizon_end_time)
         )
     # Imported/legacy autocomplete tasks use the observed target column as the
@@ -590,6 +658,25 @@ def _future_existence_values(
     labels = np.zeros(database.table(candidate.entity_table_id).row_count, dtype=np.int8)
     labels[np.unique(assignments[selected])] = 1
     return labels
+
+
+def _history_gated_values(
+    schema: PhysicalSchema, database: DatabaseInstance,
+    candidate: FutureEventCandidate, cutoff: int, horizon: int,
+) -> np.ndarray:
+    fk = _foreign_key(schema, candidate.foreign_key_id)
+    event = database.table(candidate.event_table_id)
+    times = event.column(candidate.time_column_id)
+    assignments = event.column(fk.child_column_id)
+    entity_count = database.table(candidate.entity_table_id).row_count
+    valid = assignments >= 0
+    has_history = np.zeros(entity_count, dtype=bool)
+    has_future = np.zeros(entity_count, dtype=bool)
+    has_history[np.unique(assignments[valid & (times <= cutoff)])] = True
+    has_future[
+        np.unique(assignments[valid & (times > cutoff) & (times <= horizon)])
+    ] = True
+    return (has_history & ~has_future).astype(np.int8)
 
 
 def _path_source_scores(
@@ -880,6 +967,7 @@ __all__ = [
     "relation_attribute_candidates", "future_event_candidates",
     "future_event_attribute_candidates", "temporal_aggregate_candidates",
     "build_relation_attribute_task", "build_future_event_existence_task",
+    "build_history_gated_future_activity_task",
     "build_future_event_attribute_condition_task",
     "build_temporal_relational_aggregate_task", "mechanism_labels",
     "future_event_labels",
