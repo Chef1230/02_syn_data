@@ -122,6 +122,89 @@ instance:
     linear: 0.40
     cam: 0.20
     mlp: 0.10
+  root_cause_weights:
+    standard_normal: 0.30
+    linear: 0.20
+    nonlinear: 0.20
+    lognormal: 0.15
+    gaussian_mixture: 0.15
+
+  # Role-conditioned overrides; omitted fields inherit the global prior.
+  role_scm:
+    entity:
+      scm_weights:
+        exogenous: 0.15
+        linear: 0.50
+        cam: 0.25
+        mlp: 0.10
+      root_cause_weights:
+        standard_normal: 0.25
+        linear: 0.30
+        nonlinear: 0.20
+        lognormal: 0.10
+        gaussian_mixture: 0.15
+      signal_scale_multiplier: 1.00
+      noise_scale_multiplier: 0.90
+      activation_scale_multiplier: 1.00
+      output_scale_multiplier: 1.00
+    event:
+      scm_weights:
+        exogenous: 0.10
+        linear: 0.30
+        cam: 0.35
+        mlp: 0.25
+      root_cause_weights:
+        standard_normal: 0.15
+        linear: 0.15
+        nonlinear: 0.30
+        lognormal: 0.25
+        gaussian_mixture: 0.15
+      signal_scale_multiplier: 1.15
+      noise_scale_multiplier: 1.20
+      activation_scale_multiplier: 1.10
+      output_scale_multiplier: 1.00
+    lookup:
+      scm_weights:
+        exogenous: 1.00
+      root_cause_weights:
+        standard_normal: 1.00
+      signal_scale_multiplier: 0.60
+      noise_scale_multiplier: 0.70
+      activation_scale_multiplier: 0.75
+      output_scale_multiplier: 0.80
+    bridge:
+      scm_weights:
+        exogenous: 0.10
+        linear: 0.45
+        cam: 0.30
+        mlp: 0.15
+      root_cause_weights:
+        standard_normal: 0.20
+        linear: 0.30
+        nonlinear: 0.25
+        lognormal: 0.10
+        gaussian_mixture: 0.15
+      signal_scale_multiplier: 1.10
+      noise_scale_multiplier: 0.85
+      activation_scale_multiplier: 1.00
+      output_scale_multiplier: 1.00
+    detail:
+      scm_weights:
+        exogenous: 0.15
+        linear: 0.50
+        cam: 0.25
+        mlp: 0.10
+      root_cause_weights:
+        standard_normal: 0.25
+        linear: 0.30
+        nonlinear: 0.20
+        lognormal: 0.15
+        gaussian_mixture: 0.10
+      signal_scale_multiplier: 1.00
+      noise_scale_multiplier: 0.95
+      activation_scale_multiplier: 0.95
+      output_scale_multiplier: 1.00
+
   feature_missing_rate_min: 0.02
   feature_missing_rate_max: 0.15
   # RDB-PFN-style hierarchical SCM prior. A database first samples meta

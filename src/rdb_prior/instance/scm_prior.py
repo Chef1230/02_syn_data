@@ -126,6 +126,10 @@ def sample_table_scm_parameters(
     *,
     activation_scale_min: float,
     activation_scale_max: float,
+    signal_scale_multiplier: float = 1.0,
+    noise_scale_multiplier: float = 1.0,
+    activation_scale_multiplier: float = 1.0,
+    output_scale_multiplier: float = 1.0,
 ) -> tuple[tuple[str, float], ...]:
     """Sample table-level parameters conditional on one database meta draw.
 
@@ -133,28 +137,53 @@ def sample_table_scm_parameters(
     hidden factor, dropout) so that every MLP table draws its own
     architecture within the database-level prior.
     """
+    for name, multiplier in (
+        ("signal_scale_multiplier", signal_scale_multiplier),
+        ("noise_scale_multiplier", noise_scale_multiplier),
+        ("activation_scale_multiplier", activation_scale_multiplier),
+        ("output_scale_multiplier", output_scale_multiplier),
+    ):
+        if isinstance(multiplier, bool) or not isinstance(
+            multiplier,
+            (int, float),
+        ):
+            raise TypeError(f"{name} must be numeric")
+        if multiplier <= 0:
+            raise ValueError(f"{name} must be positive")
 
-    signal_scale = _positive_truncated_normal(
-        rng,
-        mean=meta.signal_mean,
-        std=meta.signal_std,
-        floor=1e-6,
+    signal_scale = float(
+        signal_scale_multiplier
+        * _positive_truncated_normal(
+            rng,
+            mean=meta.signal_mean,
+            std=meta.signal_std,
+            floor=1e-6,
+        )
     )
-    noise_scale = _positive_truncated_normal(
-        rng,
-        mean=meta.noise_mean,
-        std=meta.noise_std,
-        floor=1e-8,
+    noise_scale = float(
+        noise_scale_multiplier
+        * _positive_truncated_normal(
+            rng,
+            mean=meta.noise_mean,
+            std=meta.noise_std,
+            floor=1e-8,
+        )
     )
     activation_scale = float(
         np.clip(
-            exp(rng.normal(meta.activation_log_center, 0.5)),
+            activation_scale_multiplier
+            * exp(rng.normal(meta.activation_log_center, 0.5)),
             activation_scale_min,
             activation_scale_max,
         )
     )
     output_scale = float(
-        np.clip(exp(rng.normal(0.0, meta.output_log_std)), 1e-3, 1e3)
+        np.clip(
+            output_scale_multiplier
+            * exp(rng.normal(0.0, meta.output_log_std)),
+            1e-3,
+            1e3,
+        )
     )
     # MLP structural realizations — each MLP table draws its own.
     mlp_depth = int(

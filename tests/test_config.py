@@ -53,6 +53,27 @@ class SchemaConfigTests(unittest.TestCase):
             0.12,
             instance.planner.categorical_high_cardinality_probability,
         )
+        role_scm = {
+            role.value: prior for role, prior in instance.planner.role_scm
+        }
+        self.assertEqual(
+            {"entity", "event", "lookup", "bridge", "detail"},
+            set(role_scm),
+        )
+        self.assertEqual(
+            0.25,
+            {
+                family.value: weight
+                for family, weight in role_scm["event"].scm_weights
+            }["mlp"],
+        )
+        self.assertEqual(1.20, role_scm["event"].noise_scale_multiplier)
+        resolved_role_scm = instance.to_dict()["planner"]["role_scm"]
+        self.assertEqual(
+            0.80,
+            resolved_role_scm["lookup"]["output_scale_multiplier"],
+        )
+        json.dumps(instance.to_dict())
         self.assertEqual(
             run_root / "schema" / "manifest.json",
             instance.schema_manifest,
@@ -138,6 +159,23 @@ class SchemaConfigTests(unittest.TestCase):
                 "unknown option",
             ):
                 load_schema_pipeline_config(path)
+
+    def test_unknown_role_scm_option_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "bad_role_scm.yaml"
+            path.write_text(
+                "instance:\n"
+                "  role_scm:\n"
+                "    event:\n"
+                "      noise_multiplier: 1.2\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                SchemaConfigError,
+                r"config\.instance\.role_scm\.event contains unknown",
+            ):
+                load_instance_pipeline_config(path)
 
     def test_nested_config_resolves_paths_from_project_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

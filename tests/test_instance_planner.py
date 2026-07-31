@@ -17,9 +17,14 @@ from rdb_prior.compilation.compiler import PhysicalSchemaCompiler
 from rdb_prior.instance.plan import (
     FeatureSCMFamily,
     InstancePlan,
+    RootCauseFamily,
     TemporalFamily,
 )
-from rdb_prior.instance.planner import InstancePlanner, InstancePlannerConfig
+from rdb_prior.instance.planner import (
+    InstancePlanner,
+    InstancePlannerConfig,
+    RoleSCMPrior,
+)
 from rdb_prior.runtime import RuntimeContext
 from rdb_prior.schema.sampler import BlueprintSampler, BlueprintSamplerConfig
 from rdb_prior.schema.spec import TableRole
@@ -34,6 +39,80 @@ class InstancePlannerTests(unittest.TestCase):
         self.assertEqual(0.20, weights[FeatureSCMFamily.CAM])
         self.assertEqual(0.10, weights[FeatureSCMFamily.MLP])
         self.assertAlmostEqual(1.0, sum(weights.values()))
+
+    def test_role_scm_override_controls_families_and_scales(self) -> None:
+        runtime = RuntimeContext(92).for_sample("role_scm_override")
+        blueprint = BlueprintSampler(
+            BlueprintSamplerConfig(min_tables=6, max_tables=6)
+        ).sample("role_scm_override", runtime)
+        schema = PhysicalSchemaCompiler().compile(
+            blueprint,
+            "role_scm_override",
+            runtime,
+        )
+        common = {
+            "entity_rows_min": 24,
+            "entity_rows_max": 32,
+            "lookup_rows_min": 4,
+            "lookup_rows_max": 8,
+            "max_rows_per_table": 96,
+        }
+        baseline = InstancePlanner(InstancePlannerConfig(**common)).plan(
+            sample_id="role_scm_override",
+            schema=schema,
+            runtime=runtime.child("database-instance"),
+        )
+        event_prior = RoleSCMPrior(
+            scm_weights=((FeatureSCMFamily.MLP, 1.0),),
+            root_cause_weights=((RootCauseFamily.NONLINEAR, 1.0),),
+            signal_scale_multiplier=2.0,
+            noise_scale_multiplier=3.0,
+        )
+        conditioned = InstancePlanner(
+            InstancePlannerConfig(
+                **common,
+                role_scm=((TableRole.EVENT, event_prior),),
+            )
+        ).plan(
+            sample_id="role_scm_override",
+            schema=schema,
+            runtime=runtime.child("database-instance"),
+        )
+
+        baseline_tables = {table.table_id: table for table in baseline.tables}
+        events = [
+            table
+            for table in conditioned.tables
+            if table.role is TableRole.EVENT
+        ]
+        self.assertTrue(events)
+        for table in events:
+            original = baseline_tables[table.table_id]
+            self.assertIs(FeatureSCMFamily.MLP, table.feature_family)
+            self.assertIs(
+                RootCauseFamily.NONLINEAR,
+                table.root_cause_family,
+            )
+            self.assertAlmostEqual(
+                2.0 * original.parameter_map["signal_scale"],
+                table.parameter_map["signal_scale"],
+            )
+            self.assertAlmostEqual(
+                3.0 * original.parameter_map["noise_scale"],
+                table.parameter_map["noise_scale"],
+            )
+
+        lookup_prior = InstancePlannerConfig().scm_prior_for_role(
+            TableRole.LOOKUP
+        )
+        self.assertEqual(
+            ((FeatureSCMFamily.EXOGENOUS, 1.0),),
+            lookup_prior.scm_weights,
+        )
+        self.assertEqual(
+            ((RootCauseFamily.STANDARD_NORMAL, 1.0),),
+            lookup_prior.root_cause_weights,
+        )
 
     def _plan(self, sample_id: str = "instance_plan"):
         runtime = RuntimeContext(91).for_sample(sample_id)

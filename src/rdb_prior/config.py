@@ -21,7 +21,7 @@ from rdb_prior.compilation.compiler import (
 )
 from rdb_prior.export.pipeline import RDBPFNExportConfig
 from rdb_prior.instance.plan import FeatureSCMFamily, RootCauseFamily
-from rdb_prior.instance.planner import InstancePlannerConfig
+from rdb_prior.instance.planner import InstancePlannerConfig, RoleSCMPrior
 from rdb_prior.pipeline import InstancePipelineConfig, SchemaPipelineConfig
 from rdb_prior.routing.config import (
     RoutedH5Config,
@@ -541,6 +541,7 @@ _INSTANCE_OPTIONS = {
     "time_scale_seconds_min",
     "time_scale_seconds_max",
     "scm_weights",
+    "role_scm",
     "mlp_depth_min",
     "mlp_depth_max",
     "mlp_hidden_factor_min",
@@ -549,6 +550,15 @@ _INSTANCE_OPTIONS = {
     "mlp_dropout_rate_min",
     "mlp_dropout_rate_max",
     "root_cause_weights",
+}
+
+_ROLE_SCM_OPTIONS = {
+    "scm_weights",
+    "root_cause_weights",
+    "signal_scale_multiplier",
+    "noise_scale_multiplier",
+    "activation_scale_multiplier",
+    "output_scale_multiplier",
 }
 
 _INSTANCE_GENERATION_OPTIONS = {
@@ -704,6 +714,11 @@ def load_instance_pipeline_config(
         RootCauseFamily,
         "config.instance.root_cause_weights",
     )
+    role_scm = _role_scm_mapping(
+        instance.get("role_scm"),
+        scm_weights=scm_weights,
+        root_cause_weights=root_cause_weights,
+    )
 
     schema_output = _stage_output_path(paths, "schema")
     schema_manifest_value = _stage_manifest_path(
@@ -717,12 +732,18 @@ def load_instance_pipeline_config(
         planner_values = {
             name: instance.get(name, getattr(defaults, name))
             for name in defaults.__dataclass_fields__
-            if name not in {"scm_weights", "root_cause_weights"}
+            if name
+            not in {
+                "scm_weights",
+                "root_cause_weights",
+                "role_scm",
+            }
         }
         planner = InstancePlannerConfig(
             **planner_values,
             scm_weights=scm_weights,
             root_cause_weights=root_cause_weights,
+            role_scm=role_scm,
         )
         return InstancePipelineConfig(
             schema_manifest=_resolve_output_root(
@@ -1149,6 +1170,77 @@ def _weight_mapping(
         return tuple((family(name), float(weight)) for name, weight in items)
     except (TypeError, ValueError) as error:
         raise SchemaConfigError(f"Invalid {path}: {error}") from error
+
+
+def _role_scm_mapping(
+    raw: Any,
+    *,
+    scm_weights: tuple[tuple[FeatureSCMFamily, float], ...],
+    root_cause_weights: tuple[tuple[RootCauseFamily, float], ...],
+) -> tuple[tuple[TableRole, RoleSCMPrior], ...]:
+    """Parse optional table-role-specific SCM family and scale priors."""
+    if raw is None:
+        return ()
+    entries = _mapping(raw, "config.instance.role_scm")
+    result: list[tuple[TableRole, RoleSCMPrior]] = []
+    for role_name, entry in entries.items():
+        path = f"config.instance.role_scm.{role_name}"
+        try:
+            role = TableRole(role_name)
+        except ValueError as error:
+            allowed_roles = ", ".join(role.value for role in TableRole)
+            raise SchemaConfigError(
+                f"Unknown role {role_name!r}; expected one of: "
+                f"{allowed_roles}"
+            ) from error
+        data = _mapping(entry, path)
+        _reject_unknown(data, _ROLE_SCM_OPTIONS, path)
+        if role is TableRole.LOOKUP:
+            default_scm_weights = ((FeatureSCMFamily.EXOGENOUS, 1.0),)
+            default_root_cause_weights = (
+                (RootCauseFamily.STANDARD_NORMAL, 1.0),
+            )
+        else:
+            default_scm_weights = scm_weights
+            default_root_cause_weights = root_cause_weights
+        try:
+            prior = RoleSCMPrior(
+                scm_weights=_weight_mapping(
+                    data.get("scm_weights"),
+                    default_scm_weights,
+                    FeatureSCMFamily,
+                    f"{path}.scm_weights",
+                    sort_keys=True,
+                ),
+                root_cause_weights=_weight_mapping(
+                    data.get("root_cause_weights"),
+                    default_root_cause_weights,
+                    RootCauseFamily,
+                    f"{path}.root_cause_weights",
+                ),
+                signal_scale_multiplier=data.get(
+                    "signal_scale_multiplier",
+                    1.0,
+                ),
+                noise_scale_multiplier=data.get(
+                    "noise_scale_multiplier",
+                    1.0,
+                ),
+                activation_scale_multiplier=data.get(
+                    "activation_scale_multiplier",
+                    1.0,
+                ),
+                output_scale_multiplier=data.get(
+                    "output_scale_multiplier",
+                    1.0,
+                ),
+            )
+        except SchemaConfigError:
+            raise
+        except (TypeError, ValueError) as error:
+            raise SchemaConfigError(f"Invalid {path}: {error}") from error
+        result.append((role, prior))
+    return tuple(result)
 
 
 # Project-wide default template. Every loaded config is deep-merged on top

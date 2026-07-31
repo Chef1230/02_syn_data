@@ -183,6 +183,83 @@ instance:
     lognormal: 0.15
     gaussian_mixture: 0.15
 
+  # <== 角色条件 SCM 先验。缺失的角色/字段回退到上述全局权重与 1.0 倍率。
+  # 权重无需归一化；倍率作用于数据库级 meta prior 采样出的表级参数。
+  role_scm:
+    entity:
+      scm_weights:
+        exogenous: 0.15
+        linear: 0.50
+        cam: 0.25
+        mlp: 0.10
+      root_cause_weights:
+        standard_normal: 0.25
+        linear: 0.30
+        nonlinear: 0.20
+        lognormal: 0.10
+        gaussian_mixture: 0.15
+      signal_scale_multiplier: 1.00
+      noise_scale_multiplier: 0.90
+      activation_scale_multiplier: 1.00
+      output_scale_multiplier: 1.00
+    event:
+      scm_weights:
+        exogenous: 0.10
+        linear: 0.30
+        cam: 0.35
+        mlp: 0.25
+      root_cause_weights:
+        standard_normal: 0.15
+        linear: 0.15
+        nonlinear: 0.30
+        lognormal: 0.25
+        gaussian_mixture: 0.15
+      signal_scale_multiplier: 1.15
+      noise_scale_multiplier: 1.20
+      activation_scale_multiplier: 1.10
+      output_scale_multiplier: 1.00
+    lookup:
+      scm_weights:
+        exogenous: 1.00
+      root_cause_weights:
+        standard_normal: 1.00
+      signal_scale_multiplier: 0.60
+      noise_scale_multiplier: 0.70
+      activation_scale_multiplier: 0.75
+      output_scale_multiplier: 0.80
+    bridge:
+      scm_weights:
+        exogenous: 0.10
+        linear: 0.45
+        cam: 0.30
+        mlp: 0.15
+      root_cause_weights:
+        standard_normal: 0.20
+        linear: 0.30
+        nonlinear: 0.25
+        lognormal: 0.10
+        gaussian_mixture: 0.15
+      signal_scale_multiplier: 1.10
+      noise_scale_multiplier: 0.85
+      activation_scale_multiplier: 1.00
+      output_scale_multiplier: 1.00
+    detail:
+      scm_weights:
+        exogenous: 0.15
+        linear: 0.50
+        cam: 0.25
+        mlp: 0.10
+      root_cause_weights:
+        standard_normal: 0.25
+        linear: 0.30
+        nonlinear: 0.20
+        lognormal: 0.15
+        gaussian_mixture: 0.10
+      signal_scale_multiplier: 1.00
+      noise_scale_multiplier: 0.95
+      activation_scale_multiplier: 0.95
+      output_scale_multiplier: 1.00
+
   # <== 分布参数: MLP 结构先验。按库采样一次, 每个 MLP 表再各自实现。
   mlp_depth_min: 1
   mlp_depth_max: 4
@@ -231,7 +308,7 @@ instance_generation:
   start_index: 0
   shard_id: 0                    # 多机分片: shard_id / num_shards
   num_shards: 1
-  num_workers: 1                 # 进程级并行, 一个 worker 一个库
+  num_workers: 16                 # 进程级并行, 一个 worker 一个库
   progress_every: 100
   overwrite: false
   project_version: instance-pipeline-v1
@@ -301,7 +378,7 @@ rdbpfn_export:
   rdbpfn_preprocessing_root: ../RDBPFN/data_preprocessing
   h5_run_dfs: true               # false = 仅打包已有 rdbpfn-processed 目录
   dfs_depth: 1
-  dfs_jobs: 4
+  dfs_jobs: 24
   h5_total_rows: 600
   h5_max_columns: 60
   h5_seed: 42

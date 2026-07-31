@@ -245,13 +245,47 @@ class InstancePipelineConfig:
             "planner": {
                 name: getattr(planner, name)
                 for name in planner.__dataclass_fields__
-                if name != "scm_weights"
+                if name
+                not in {
+                    "scm_weights",
+                    "root_cause_weights",
+                    "role_scm",
+                }
             }
             | {
                 "scm_weights": [
                     [family.value, weight]
                     for family, weight in planner.scm_weights
-                ]
+                ],
+                "root_cause_weights": [
+                    [family.value, weight]
+                    for family, weight in planner.root_cause_weights
+                ],
+                "role_scm": {
+                    role.value: {
+                        "scm_weights": [
+                            [family.value, weight]
+                            for family, weight in prior.scm_weights
+                        ],
+                        "root_cause_weights": [
+                            [family.value, weight]
+                            for family, weight in prior.root_cause_weights
+                        ],
+                        "signal_scale_multiplier": (
+                            prior.signal_scale_multiplier
+                        ),
+                        "noise_scale_multiplier": (
+                            prior.noise_scale_multiplier
+                        ),
+                        "activation_scale_multiplier": (
+                            prior.activation_scale_multiplier
+                        ),
+                        "output_scale_multiplier": (
+                            prior.output_scale_multiplier
+                        ),
+                    }
+                    for role, prior in planner.role_scm
+                },
             },
         }
 

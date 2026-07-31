@@ -248,8 +248,8 @@ value/weight lists.
   table-count rules, optional role overrides, nullability probability and
   primary-key name candidates.
 - `instance`: role-conditioned population bounds, shared latent dimension, FK
-  affinity, optionality rates, SCM mixture, missingness, noise, categorical
-  cardinality, and event-time scales.
+  affinity, optionality rates, global/role-specific SCM priors, missingness,
+  noise, categorical cardinality, and event-time scales.
 - `instance_generation`: schema selection, deterministic sharding, progress,
   overwrite behavior and project version.
 - `task`: tasks per database, mechanism weights, support/query sizing,
@@ -262,6 +262,13 @@ value/weight lists.
 Feature-column precedence is `role override -> table-count rule -> default`.
 The only valid role override keys are `entity`, `event`, `lookup`, `bridge`
 and `detail`.
+
+`instance.role_scm.<role>` can override `scm_weights`,
+`root_cause_weights`, `signal_scale_multiplier`, `noise_scale_multiplier`,
+`activation_scale_multiplier`, and `output_scale_multiplier`. Missing fields
+inherit the global instance prior; missing roles use global weights with unit
+multipliers. For backward compatibility, an unconfigured Lookup role remains
+exogenous with a standard-normal root cause.
 
 Connectivity, FK DAG, self-loop prohibition, parallel-FK prohibition, rank
 ordering, role-edge legality, Entity/Event presence and Bridge parent counts
@@ -310,13 +317,14 @@ OUTPUT_DIR/instance/
     tables/*.npz
 ```
 
-Entity tables use Linear, CAM, or MLP SCMs. Lookup tables are exogenous and
-their incoming selections use CPT, latent softmax, or state-transition
-mechanisms. Event tables use parent-burst or time-lagged temporal mechanisms.
-Bridge parents are sampled
-jointly with affinity, while Detail tables use parent-conditioned populations
-and the same Linear/CAM/MLP family. One shared latent registry drives FK choice
-and feature contexts; FK rows are therefore not sampled uniformly.
+Feature SCM families, root-cause families, and realized SCM scales are
+conditioned on each table role. The default prior emphasizes Linear mechanisms
+for Entity/Detail tables, CAM/MLP mechanisms for Event tables, and exogenous
+features for Lookup tables. Lookup incoming selections use CPT, latent softmax,
+or state-transition mechanisms. Event tables use parent-burst or time-lagged
+temporal mechanisms. Bridge parents are sampled jointly with affinity. One
+shared latent registry drives FK choice and feature contexts; FK rows are
+therefore not sampled uniformly.
 
 The production `refactor_v2.yaml` uses a realistic heavy-tailed instance
 prior. Root Entity populations are bounded log-normal draws; Lookup sizes are
@@ -324,9 +332,9 @@ log-uniform; Event, Detail, Bridge, and child-Entity populations are
 parent-conditioned log-normal multipliers. Missingness is zero-inflated with
 a Beta-distributed non-zero tail, noise is log-uniform, and categorical
 cardinality contains a small high-cardinality component. Role-specific feature
-widths prevent large schemas from forcing every table to be unrealistically
-narrow. The bounds remain explicit so large 20k-schema runs cannot create
-unbounded tables.
+widths and role-specific SCM priors prevent large schemas from forcing every
+table to be unrealistically narrow or causally interchangeable. The bounds
+remain explicit so large 20k-schema runs cannot create unbounded tables.
 
 The instance artifact can be loaded with
 `rdb_prior.artifacts.load_instance_artifact`.
@@ -376,7 +384,11 @@ DFS writes relational features to the sibling directory
 `OUTPUT_DIR/rdbpfn-processed/`. H5 rows keep train+validation (support) before
 test (query), and `single_eval_pos` stores that boundary. The writer streams
 one processed task at a time, so packaging does not retain the whole corpus in
-memory.
+memory. Per-dataset staging artifacts land in `OUTPUT_DIR/rdbpfn-tmp/` and are
+removed once a DFS run succeeds; a failed run keeps them for debugging. While
+DFS runs, its subprocess output is written to
+`OUTPUT_DIR/rdbpfn_dfs_depth<N>.log` and a completed/total heartbeat is logged
+every 60 seconds.
 
 One directory is emitted per task because row visibility, cutoff time, and
 masked targets are task-specific. The exporter applies the canonical

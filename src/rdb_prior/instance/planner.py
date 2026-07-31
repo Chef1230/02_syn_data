@@ -38,6 +38,39 @@ _DEFAULT_ROOT_CAUSE_WEIGHTS = (
     (RootCauseFamily.GAUSSIAN_MIXTURE, 0.15),
 )
 
+_LOOKUP_SCM_WEIGHTS = ((FeatureSCMFamily.EXOGENOUS, 1.0),)
+_LOOKUP_ROOT_CAUSE_WEIGHTS = ((RootCauseFamily.STANDARD_NORMAL, 1.0),)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RoleSCMPrior:
+    """Table-role-specific SCM families and scale adjustments."""
+
+    scm_weights: tuple[tuple[FeatureSCMFamily, float], ...] = (
+        _DEFAULT_SCM_WEIGHTS
+    )
+    root_cause_weights: tuple[tuple[RootCauseFamily, float], ...] = (
+        _DEFAULT_ROOT_CAUSE_WEIGHTS
+    )
+    signal_scale_multiplier: float = 1.0
+    noise_scale_multiplier: float = 1.0
+    activation_scale_multiplier: float = 1.0
+    output_scale_multiplier: float = 1.0
+
+    def __post_init__(self) -> None:
+        _validate_scm_weights(self.scm_weights, "scm_weights")
+        _validate_root_cause_weights(
+            self.root_cause_weights,
+            "root_cause_weights",
+        )
+        for name in (
+            "signal_scale_multiplier",
+            "noise_scale_multiplier",
+            "activation_scale_multiplier",
+            "output_scale_multiplier",
+        ):
+            _positive_scalar(name, getattr(self, name))
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class InstancePlannerConfig:
@@ -97,6 +130,9 @@ class InstancePlannerConfig:
     root_cause_weights: tuple[tuple[RootCauseFamily, float], ...] = (
         _DEFAULT_ROOT_CAUSE_WEIGHTS
     )
+    # Optional per-role overrides. Missing roles inherit the global weights
+    # and unit multipliers; Lookup keeps its historical exogenous prior.
+    role_scm: tuple[tuple[TableRole, RoleSCMPrior], ...] = ()
     # MLP structural prior ranges — sampled once per database, each MLP
     # table then draws its own depth / hidden factor / dropout realisation.
     mlp_depth_min: int = 1
@@ -269,33 +305,42 @@ class InstancePlannerConfig:
             self.time_scale_seconds_min,
             self.time_scale_seconds_max,
         )
-        if not isinstance(self.scm_weights, tuple) or not self.scm_weights:
-            raise ValueError("scm_weights must be a non-empty tuple")
-        families = tuple(family for family, _weight in self.scm_weights)
-        if len(set(families)) != len(families):
-            raise ValueError("scm_weights families must be unique")
-        for family, weight in self.scm_weights:
-            if family not in {
-                FeatureSCMFamily.EXOGENOUS,
-                FeatureSCMFamily.LINEAR,
-                FeatureSCMFamily.CAM,
-                FeatureSCMFamily.MLP,
-            }:
-                raise ValueError(
-                    "scm_weights supports exogenous, linear, cam and mlp"
-                )
-            if weight <= 0:
-                raise ValueError("scm weights must be positive")
-        if not isinstance(self.root_cause_weights, tuple) or not self.root_cause_weights:
-            raise ValueError("root_cause_weights must be a non-empty tuple")
-        rc_families = tuple(family for family, _w in self.root_cause_weights)
-        if len(set(rc_families)) != len(rc_families):
-            raise ValueError("root_cause_weights families must be unique")
-        for family, weight in self.root_cause_weights:
-            if not isinstance(family, RootCauseFamily):
-                raise TypeError("root_cause_weights keys must be RootCauseFamily")
-            if weight <= 0:
-                raise ValueError("root_cause weights must be positive")
+        _validate_scm_weights(self.scm_weights, "scm_weights")
+        _validate_root_cause_weights(
+            self.root_cause_weights,
+            "root_cause_weights",
+        )
+        if not isinstance(self.role_scm, tuple):
+            raise TypeError("role_scm must be a tuple")
+        roles: list[TableRole] = []
+        for item in self.role_scm:
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise TypeError("role_scm items must be role-prior pairs")
+            role, prior = item
+            if not isinstance(role, TableRole):
+                raise TypeError("role_scm keys must be TableRole")
+            if not isinstance(prior, RoleSCMPrior):
+                raise TypeError("role_scm values must be RoleSCMPrior")
+            roles.append(role)
+        if len(set(roles)) != len(roles):
+            raise ValueError("role_scm roles must be unique")
+
+    def scm_prior_for_role(self, role: TableRole) -> RoleSCMPrior:
+        """Resolve one role override without changing legacy defaults."""
+        if not isinstance(role, TableRole):
+            raise TypeError("role must be TableRole")
+        for configured_role, prior in self.role_scm:
+            if configured_role is role:
+                return prior
+        if role is TableRole.LOOKUP:
+            return RoleSCMPrior(
+                scm_weights=_LOOKUP_SCM_WEIGHTS,
+                root_cause_weights=_LOOKUP_ROOT_CAUSE_WEIGHTS,
+            )
+        return RoleSCMPrior(
+            scm_weights=self.scm_weights,
+            root_cause_weights=self.root_cause_weights,
+        )
 
 
 class InstancePlanner:
@@ -366,8 +411,13 @@ class InstancePlanner:
                 incoming[table_id],
                 schema,
             )
-            family = self._feature_family(table.role, runtime, table_id)
-            root_cause = self._root_cause_family(table.role, runtime, table_id)
+            role_scm = self.config.scm_prior_for_role(table.role)
+            family = self._feature_family(role_scm, runtime, table_id)
+            root_cause = self._root_cause_family(
+                role_scm,
+                runtime,
+                table_id,
+            )
             parameter_rng = runtime.numpy_rng(
                 "instance", "table-parameters", table_id
             )
@@ -376,6 +426,12 @@ class InstancePlanner:
                 meta,
                 activation_scale_min=self.config.scm_activation_scale_min,
                 activation_scale_max=self.config.scm_activation_scale_max,
+                signal_scale_multiplier=role_scm.signal_scale_multiplier,
+                noise_scale_multiplier=role_scm.noise_scale_multiplier,
+                activation_scale_multiplier=(
+                    role_scm.activation_scale_multiplier
+                ),
+                output_scale_multiplier=role_scm.output_scale_multiplier,
             )
             table_plans[table_id] = TableMechanismPlan(
                 table_id=table_id,
@@ -560,27 +616,23 @@ class InstancePlanner:
 
     def _feature_family(
         self,
-        role: TableRole,
+        prior: RoleSCMPrior,
         runtime: RuntimeContext,
         table_id: str,
     ) -> FeatureSCMFamily:
-        if role is TableRole.LOOKUP:
-            return FeatureSCMFamily.EXOGENOUS
         rng = runtime.python_rng("instance", "scm-family", table_id)
-        families, weights = zip(*self.config.scm_weights)
+        families, weights = zip(*prior.scm_weights)
         return rng.choices(families, weights=weights, k=1)[0]
 
     def _root_cause_family(
         self,
-        role: TableRole,
+        prior: RoleSCMPrior,
         runtime: RuntimeContext,
         table_id: str,
     ) -> RootCauseFamily:
         """Sample the exogenous latent distribution family for one table."""
-        if role is TableRole.LOOKUP:
-            return RootCauseFamily.STANDARD_NORMAL
         rng = runtime.python_rng("instance", "root-cause", table_id)
-        families, weights = zip(*self.config.root_cause_weights)
+        families, weights = zip(*prior.root_cause_weights)
         return rng.choices(families, weights=weights, k=1)[0]
 
     @staticmethod
@@ -703,4 +755,40 @@ def _positive_scalar(name: str, value: float) -> None:
         raise ValueError(f"{name} must be positive")
 
 
-__all__ = ["InstancePlannerConfig", "InstancePlanner"]
+def _validate_scm_weights(
+    weights: tuple[tuple[FeatureSCMFamily, float], ...],
+    name: str,
+) -> None:
+    if not isinstance(weights, tuple) or not weights:
+        raise ValueError(f"{name} must be a non-empty tuple")
+    for item in weights:
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise TypeError(f"{name} items must be family-weight pairs")
+    families = tuple(family for family, _weight in weights)
+    if len(set(families)) != len(families):
+        raise ValueError(f"{name} families must be unique")
+    for family, weight in weights:
+        if not isinstance(family, FeatureSCMFamily):
+            raise TypeError(f"{name} keys must be FeatureSCMFamily")
+        _positive_scalar(f"{name} weight", weight)
+
+
+def _validate_root_cause_weights(
+    weights: tuple[tuple[RootCauseFamily, float], ...],
+    name: str,
+) -> None:
+    if not isinstance(weights, tuple) or not weights:
+        raise ValueError(f"{name} must be a non-empty tuple")
+    for item in weights:
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise TypeError(f"{name} items must be family-weight pairs")
+    families = tuple(family for family, _weight in weights)
+    if len(set(families)) != len(families):
+        raise ValueError(f"{name} families must be unique")
+    for family, weight in weights:
+        if not isinstance(family, RootCauseFamily):
+            raise TypeError(f"{name} keys must be RootCauseFamily")
+        _positive_scalar(f"{name} weight", weight)
+
+
+__all__ = ["RoleSCMPrior", "InstancePlannerConfig", "InstancePlanner"]
