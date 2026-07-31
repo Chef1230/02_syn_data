@@ -7,7 +7,9 @@ import hashlib
 import logging
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import threading
 from typing import Any, Callable, Mapping
 
 import numpy as np
@@ -64,8 +66,19 @@ def run_rdbpfn_dfs(
     depth: int,
     jobs: int,
     bash_command: str = "bash",
+    progress_interval: float = 60.0,
 ) -> Path:
-    """Run RDBPFN's batch DFS script and return its processed root."""
+    """Run RDBPFN's batch DFS script and return its processed root.
+
+    The batch script processes every dataset under ``raw_root`` with
+    ``jobs`` parallel workers, which can take hours for large corpora.
+    Its combined stdout/stderr is written to a log file next to
+    ``raw_root`` and a heartbeat reporting the number of completed
+    datasets is emitted every ``progress_interval`` seconds so the step
+    remains observable under LOG_LEVEL=WARNING. On success the batch
+    script's intermediate tree ``<raw_root>-tmp`` is removed; on failure
+    it is kept for debugging.
+    """
     if depth not in (1, 2):
         raise ValueError("DFS depth must be 1 or 2")
     if isinstance(jobs, bool) or not isinstance(jobs, int) or jobs < 1:
@@ -85,44 +98,145 @@ def run_rdbpfn_dfs(
             "existing datasets: %s",
             processed_root,
         )
-    _LOGGER.info(
-        "starting RDBPFN DFS: depth=%d jobs=%d input=%s (suppressing subprocess logs)",
+    total_datasets = _count_directories(raw_root)
+    log_path = raw_root.parent / f"{raw_root.name}_dfs_depth{depth}.log"
+    command = [bash_command, str(script), str(raw_root), str(jobs)]
+    _LOGGER.warning(
+        "starting RDBPFN DFS: depth=%d jobs=%d datasets=%s input=%s; "
+        "subprocess output is written to %s (tail -f it for live progress)",
         depth,
         jobs,
+        total_datasets if total_datasets >= 0 else "?",
         raw_root,
+        log_path,
     )
     env = os.environ.copy()
     # RDBPFN preprocessing scripts use LOG_CFG / LOG_LEVEL for their own
     # logger; silence INFO and DEBUG so only warnings and errors surface.
     env["LOG_LEVEL"] = "WARNING"
     env["LOG_CFG"] = "WARNING"
-    result = subprocess.run(
-        [bash_command, str(script), str(raw_root), str(jobs)],
-        cwd=preprocessing_root,
-        check=False,
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
+    interval = progress_interval if progress_interval > 0 else 60.0
+    stop = threading.Event()
+    watcher = threading.Thread(
+        target=_dfs_progress_watchdog,
+        args=(processed_root, depth, total_datasets, interval, stop),
+        daemon=True,
+        name=f"dfs-depth{depth}-progress",
     )
+    watcher.start()
+    try:
+        with log_path.open("w", encoding="utf-8") as log_handle:
+            result = subprocess.run(
+                command,
+                cwd=preprocessing_root,
+                check=False,
+                env=env,
+                # Never let child processes block waiting on the terminal
+                # (e.g. GNU parallel's first-run citation prompt).
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+            )
+    finally:
+        stop.set()
+        watcher.join(timeout=5.0)
     if result.returncode != 0:
         _LOGGER.error(
-            "RDBPFN DFS failed (exit %d):\n%s",
+            "RDBPFN DFS failed (exit %d); last log lines from %s:\n%s",
             result.returncode,
-            result.stderr.strip() or "(no stderr)",
+            log_path,
+            _read_log_tail(log_path),
         )
         raise subprocess.CalledProcessError(
             result.returncode,
-            [bash_command, str(script), str(raw_root), str(jobs)],
+            command,
             output=None,
-            stderr=result.stderr,
+            stderr=None,
         )
     if not processed_root.is_dir():
         raise RuntimeError(
             f"RDBPFN DFS completed without creating {processed_root}"
         )
-    _LOGGER.info("RDBPFN DFS complete: output=%s", processed_root)
+    _remove_dfs_tmp(raw_root)
+    _LOGGER.warning("RDBPFN DFS complete: output=%s", processed_root)
     return processed_root
+
+
+def _remove_dfs_tmp(raw_root: Path) -> None:
+    """Remove the DFS batch script's intermediate tree, ``<raw_root>-tmp``.
+
+    The batch script writes per-dataset ``-pre-dfs``/``-post-dfs`` staging
+    directories there and never cleans them up. They are expendable once
+    the run succeeds (the ``<raw_root>-processed`` outputs are what the H5
+    packaging consumes), so removal is best effort: a failure logs a
+    warning instead of failing the pipeline, and on a failed DFS run this
+    is never called so the intermediates stay available for debugging.
+    """
+    tmp_root = Path(f"{raw_root}-tmp")
+    if not tmp_root.is_dir():
+        return
+    try:
+        entry_count = sum(1 for _ in tmp_root.iterdir())
+    except OSError:
+        entry_count = -1
+    try:
+        shutil.rmtree(tmp_root)
+    except OSError as error:
+        _LOGGER.warning(
+            "could not remove DFS intermediate directory %s: %s",
+            tmp_root,
+            error,
+        )
+        return
+    _LOGGER.warning(
+        "removed DFS intermediate directory: %s (%s entries)",
+        tmp_root,
+        entry_count if entry_count >= 0 else "?",
+    )
+
+
+def _dfs_progress_watchdog(
+    processed_root: Path,
+    depth: int,
+    total_datasets: int,
+    interval: float,
+    stop: threading.Event,
+) -> None:
+    suffix = f"-dfs-{depth}"
+    while not stop.wait(interval):
+        completed = -1
+        if processed_root.is_dir():
+            completed = 0
+            try:
+                completed = sum(
+                    1
+                    for path in processed_root.iterdir()
+                    if path.is_dir() and path.name.endswith(suffix)
+                )
+            except OSError:
+                completed = -1
+        _LOGGER.warning(
+            "RDBPFN DFS in progress: %s dataset(s) completed",
+            f"{completed}/{total_datasets}"
+            if completed >= 0 and total_datasets >= 0
+            else (completed if completed >= 0 else "?"),
+        )
+
+
+def _count_directories(root: Path) -> int:
+    try:
+        return sum(1 for path in root.iterdir() if path.is_dir())
+    except OSError:
+        return -1
+
+
+def _read_log_tail(log_path: Path, max_chars: int = 4000) -> str:
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "(log file unreadable)"
+    tail = text.strip()[-max_chars:]
+    return tail or "(empty log)"
 
 
 def export_processed_dbb_to_h5(

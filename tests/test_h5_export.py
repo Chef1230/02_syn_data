@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,7 +18,50 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 
-from rdb_prior.export.h5 import H5ExportConfig, export_processed_dbb_to_h5
+from rdb_prior.export.h5 import (
+    H5ExportConfig,
+    _remove_dfs_tmp,
+    export_processed_dbb_to_h5,
+    run_rdbpfn_dfs,
+)
+
+
+def _find_working_bash() -> str | None:
+    """Locate a bash that can actually run POSIX scripts.
+
+    shutil.which("bash") is not enough on Windows: PATH may resolve to
+    the WSL launcher stub, which fails on Windows-style paths. Probe each
+    candidate once and keep the first one that executes ``echo ok``.
+    """
+    candidates: list[str] = []
+    env_bash = os.environ.get("BASH")
+    if env_bash:
+        candidates.append(env_bash)
+    seen: set[str] = set()
+    for directory in os.environ.get("PATH", os.defpath).split(os.pathsep):
+        if not directory:
+            continue
+        for name in ("bash.exe", "bash"):
+            candidate = str(Path(directory, name))
+            if candidate not in seen:
+                seen.add(candidate)
+                candidates.append(candidate)
+    for candidate in candidates:
+        try:
+            probe = subprocess.run(
+                [candidate, "-c", "echo ok"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if probe.returncode == 0 and probe.stdout.strip() == "ok":
+            return candidate
+    return None
+
+
+TEST_BASH = _find_working_bash()
 
 
 class H5ExportTests(unittest.TestCase):
@@ -165,6 +210,91 @@ class H5ExportTests(unittest.TestCase):
                     np.int64 if task_type == "classification" else np.float32
                 ),
             )
+
+
+@unittest.skipUnless(
+    TEST_BASH, "a working POSIX bash is required to run the DFS batch script"
+)
+class RunRdbpfnDfsTests(unittest.TestCase):
+    def test_removes_tmp_tree_after_successful_dfs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            raw_root = root / "rdbpfn"
+            (raw_root / "task_sample_000000_000").mkdir(parents=True)
+            stale_tmp = raw_root.parent / "rdbpfn-tmp" / "stale-pre-dfs"
+            stale_tmp.mkdir(parents=True)
+            preprocessing = root / "preprocessing"
+            preprocessing.mkdir()
+            script = preprocessing / "benchmark_preprocess_depth1.sh"
+            script.write_text(
+                "#!/bin/sh\n"
+                'mkdir -p "$1-processed/probe-dfs-1"\n'
+                'mkdir -p "$1-tmp/probe-pre-dfs"\n',
+                encoding="utf-8",
+            )
+
+            processed = run_rdbpfn_dfs(
+                raw_root=raw_root,
+                preprocessing_root=preprocessing,
+                depth=1,
+                jobs=2,
+                bash_command=TEST_BASH,
+                progress_interval=3600.0,
+            )
+
+            self.assertEqual(Path(f"{raw_root}-processed"), processed)
+            self.assertTrue((processed / "probe-dfs-1").is_dir())
+            self.assertFalse(Path(f"{raw_root}-tmp").exists())
+            self.assertTrue(
+                (raw_root.parent / "rdbpfn_dfs_depth1.log").is_file()
+            )
+
+    def test_keeps_tmp_tree_when_dfs_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            raw_root = root / "rdbpfn"
+            raw_root.mkdir()
+            tmp_root = Path(f"{raw_root}-tmp")
+            (tmp_root / "probe-pre-dfs").mkdir(parents=True)
+            preprocessing = root / "preprocessing"
+            preprocessing.mkdir()
+            script = preprocessing / "benchmark_preprocess_depth1.sh"
+            script.write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
+
+            with self.assertRaises(subprocess.CalledProcessError) as caught:
+                run_rdbpfn_dfs(
+                    raw_root=raw_root,
+                    preprocessing_root=preprocessing,
+                    depth=1,
+                    jobs=2,
+                    bash_command=TEST_BASH,
+                    progress_interval=3600.0,
+                )
+
+            self.assertEqual(3, caught.exception.returncode)
+            self.assertTrue(tmp_root.is_dir())
+            self.assertFalse(Path(f"{raw_root}-processed").exists())
+
+
+class RemoveDfsTmpTests(unittest.TestCase):
+    def test_removes_existing_tmp_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            raw_root = Path(temporary_directory) / "rdbpfn"
+            tmp_root = Path(f"{raw_root}-tmp")
+            (tmp_root / "task_sample_000000_000-pre-dfs").mkdir(parents=True)
+            (tmp_root / "task_sample_000000_000-post-dfs").mkdir()
+
+            _remove_dfs_tmp(raw_root)
+
+            self.assertFalse(tmp_root.exists())
+
+    def test_noop_when_tmp_tree_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            raw_root = Path(temporary_directory) / "rdbpfn"
+
+            _remove_dfs_tmp(raw_root)
+
+            self.assertFalse(Path(f"{raw_root}-tmp").exists())
 
 
 if __name__ == "__main__":
