@@ -326,7 +326,7 @@ class SchemaConfigTests(unittest.TestCase):
             overrides=TaskConfigOverrides(tasks_per_database=4),
         )
         self.assertEqual(4, config.planner.tasks_per_database)
-        self.assertEqual(5, len(config.planner.mechanism_weights))
+        self.assertEqual(6, len(config.planner.mechanism_weights))
 
         stdout = StringIO()
         with redirect_stdout(stdout):

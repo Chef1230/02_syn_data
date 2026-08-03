@@ -306,6 +306,8 @@ class RDBPFNConverter:
             if plan.mechanism in {
                 TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE,
                 TaskMechanism.HISTORY_GATED_FUTURE_ACTIVITY,
+                TaskMechanism.HISTORY_GATED_FUTURE_INACTIVE,
+                TaskMechanism.HISTORY_GATED_FUTURE_ACTIVE,
             }:
                 cutoff = np.full(len(rows), int(plan.cutoff_time), dtype=np.int64)
                 columns[_CUTOFF_COLUMN] = _seconds_to_datetime(cutoff)

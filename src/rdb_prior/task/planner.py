@@ -11,6 +11,8 @@ from rdb_prior.task.mechanisms import (
     build_future_event_attribute_condition_task,
     build_future_event_existence_task,
     build_history_gated_future_activity_task,
+    build_history_gated_future_inactive_task,
+    build_history_gated_future_active_task,
     build_relation_attribute_task,
     build_temporal_relational_aggregate_task,
     future_event_attribute_candidates,
@@ -24,7 +26,8 @@ from rdb_prior.task.model import PlannedTask, TaskMechanism
 _DEFAULT_MECHANISM_WEIGHTS = (
     (TaskMechanism.RELATION_ATTRIBUTE, 0.35),
     (TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE, 0.25),
-    (TaskMechanism.HISTORY_GATED_FUTURE_ACTIVITY, 0.15),
+    (TaskMechanism.HISTORY_GATED_FUTURE_INACTIVE, 0.08),
+    (TaskMechanism.HISTORY_GATED_FUTURE_ACTIVE, 0.07),
     (TaskMechanism.FUTURE_EVENT_ATTRIBUTE_CONDITION, 0.20),
     (TaskMechanism.TEMPORAL_RELATIONAL_AGGREGATE, 0.20),
 )
@@ -98,6 +101,8 @@ class TaskPlanner:
             ),
             TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE: list(future_event_candidates(schema)),
             TaskMechanism.HISTORY_GATED_FUTURE_ACTIVITY: list(future_event_candidates(schema)),
+            TaskMechanism.HISTORY_GATED_FUTURE_INACTIVE: list(future_event_candidates(schema)),
+            TaskMechanism.HISTORY_GATED_FUTURE_ACTIVE: list(future_event_candidates(schema)),
             TaskMechanism.FUTURE_EVENT_ATTRIBUTE_CONDITION: list(
                 future_event_attribute_candidates(schema, database)
             ),
@@ -147,6 +152,24 @@ class TaskPlanner:
                 )
             elif mechanism is TaskMechanism.HISTORY_GATED_FUTURE_ACTIVITY:
                 task = build_history_gated_future_activity_task(
+                    **common, cutoff_quantile_min=self.config.cutoff_quantile_min,
+                    cutoff_quantile_max=self.config.cutoff_quantile_max,
+                    horizon_fraction_min=self.config.horizon_fraction_min,
+                    horizon_fraction_max=self.config.horizon_fraction_max,
+                    positive_rate_min=self.config.positive_rate_min,
+                    positive_rate_max=min(self.config.positive_rate_max, 0.8),
+                )
+            elif mechanism is TaskMechanism.HISTORY_GATED_FUTURE_INACTIVE:
+                task = build_history_gated_future_inactive_task(
+                    **common, cutoff_quantile_min=self.config.cutoff_quantile_min,
+                    cutoff_quantile_max=self.config.cutoff_quantile_max,
+                    horizon_fraction_min=self.config.horizon_fraction_min,
+                    horizon_fraction_max=self.config.horizon_fraction_max,
+                    positive_rate_min=self.config.positive_rate_min,
+                    positive_rate_max=min(self.config.positive_rate_max, 0.8),
+                )
+            elif mechanism is TaskMechanism.HISTORY_GATED_FUTURE_ACTIVE:
+                task = build_history_gated_future_active_task(
                     **common, cutoff_quantile_min=self.config.cutoff_quantile_min,
                     cutoff_quantile_max=self.config.cutoff_quantile_max,
                     horizon_fraction_min=self.config.horizon_fraction_min,

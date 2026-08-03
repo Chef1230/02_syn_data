@@ -256,6 +256,138 @@ class TaskGenerationTests(unittest.TestCase):
             return
         self.fail("no balanced history-gated task found in 40 databases")
 
+    def _expected_submode_labels(
+        self,
+        schema: PhysicalSchema,
+        database: DatabaseInstance,
+        plan: TaskPlan,
+        mechanism: TaskMechanism,
+    ) -> np.ndarray:
+        """Independently derive the sub-mode label array from raw event rows.
+
+        Entities without any history get ``-1`` (excluded from the sample);
+        the two sub-modes only differ in which group is the positive class:
+        - ``HISTORY_GATED_FUTURE_INACTIVE``: positive = no future events
+        - ``HISTORY_GATED_FUTURE_ACTIVE``:  positive = has future events
+        """
+        fk = next(
+            foreign_key
+            for foreign_key in schema.foreign_keys
+            if foreign_key.foreign_key_id == plan.foreign_key_id
+        )
+        event = database.table(plan.source_table_id)
+        times = event.column(plan.time_column_id or "")
+        assignments = event.column(fk.child_column_id)
+        entity_count = database.table(plan.target_table_id).row_count
+        valid = assignments >= 0
+        has_history = np.zeros(entity_count, dtype=bool)
+        has_future = np.zeros(entity_count, dtype=bool)
+        has_history[
+            np.unique(assignments[valid & (times <= plan.cutoff_time)])
+        ] = True
+        has_future[np.unique(assignments[
+            valid
+            & (times > plan.cutoff_time)
+            & (times <= plan.horizon_end_time)
+        ])] = True
+
+        labels = np.full(entity_count, -1, dtype=np.int8)
+        if mechanism is TaskMechanism.HISTORY_GATED_FUTURE_INACTIVE:
+            labels[has_history & ~has_future] = 1
+            labels[has_history & has_future] = 0
+        else:
+            labels[has_history & has_future] = 1
+            labels[has_history & ~has_future] = 0
+        return labels
+
+    def _test_history_gated_submode(self, mechanism: TaskMechanism) -> None:
+        """Shared test body for the two history-gated sub-modes.
+
+        Both sub-modes restrict samples to entities with prior history and
+        only differ in which group is the positive class.
+        """
+        planner = TaskPlanner(
+            TaskPlannerConfig(
+                tasks_per_database=1,
+                mechanism_weights=((mechanism, 1.0),),
+                min_support_rows=8,
+                min_query_rows=4,
+                min_class_count_per_split=1,
+                max_attempts_per_database=512,
+            )
+        )
+        for index in range(40):
+            sample_id = f"hg_submode_{mechanism.value}_{index}"
+            runtime, schema, database = self._database(
+                sample_id, min_tables=5, max_tables=7
+            )
+            try:
+                tasks = planner.generate(
+                    sample_id=sample_id,
+                    schema=schema,
+                    database=database,
+                    runtime=runtime.child("task"),
+                )
+            except ValueError:
+                continue
+            task = tasks[0]
+            plan = task.plan
+
+            # Independently recompute expected labels from raw event rows —
+            # not via mechanism_labels, so the task and the recompute path
+            # are both cross-checked against the sub-mode semantics.
+            expected = self._expected_submode_labels(
+                schema, database, plan, mechanism
+            )
+            # Entities without history are excluded from the sample.
+            supervised = np.concatenate(
+                (task.data.support_row_ids, task.data.query_row_ids)
+            )
+            self.assertTrue(
+                np.all(expected[supervised] >= 0),
+                f"Sub-mode {mechanism.value}: all supervised entities must have history",
+            )
+            # Both classes must be present.
+            supervised_labels = expected[supervised]
+            self.assertEqual(
+                {0, 1},
+                set(np.unique(supervised_labels).tolist()),
+                f"Sub-mode {mechanism.value}: both classes must appear",
+            )
+
+            # The task's stored labels and the recompute path must both agree
+            # with the independently derived expectation.
+            np.testing.assert_array_equal(
+                task.data.support_labels,
+                expected[task.data.support_row_ids],
+            )
+            np.testing.assert_array_equal(
+                task.data.query_labels,
+                expected[task.data.query_row_ids],
+            )
+            np.testing.assert_array_equal(
+                expected, mechanism_labels(schema, database, plan)
+            )
+            self.assertTrue(
+                np.any(expected >= 0),
+                f"Sub-mode {mechanism.value}: some entities must have history",
+            )
+            self.assertTrue(validate_task(schema, database, task).is_valid)
+            return
+        self.fail(f"no balanced {mechanism.value} task found in 40 databases")
+
+    def test_history_gated_future_inactive_submode(self) -> None:
+        """Sub-mode 1: entities with history, positive = no future events."""
+        self._test_history_gated_submode(
+            TaskMechanism.HISTORY_GATED_FUTURE_INACTIVE
+        )
+
+    def test_history_gated_future_active_submode(self) -> None:
+        """Sub-mode 2: entities with history, positive = has future events."""
+        self._test_history_gated_submode(
+            TaskMechanism.HISTORY_GATED_FUTURE_ACTIVE
+        )
+
     def test_full_task_pipeline_honors_tasks_per_database(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

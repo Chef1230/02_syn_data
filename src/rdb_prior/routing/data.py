@@ -908,6 +908,8 @@ def _route_supervision(
     if not roles and plan.mechanism in {
         TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE,
         TaskMechanism.HISTORY_GATED_FUTURE_ACTIVITY,
+        TaskMechanism.HISTORY_GATED_FUTURE_INACTIVE,
+        TaskMechanism.HISTORY_GATED_FUTURE_ACTIVE,
     }:
         if plan.foreign_key_id is not None:
             roles[(plan.foreign_key_id,)] = RouteRole.REQUIRED

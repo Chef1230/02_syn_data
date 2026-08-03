@@ -332,6 +332,96 @@ def build_relation_attribute_task(
     )
 
 
+def _build_history_gated_submode_task(
+    *, task_id: str, sample_id: str, schema: PhysicalSchema,
+    database: DatabaseInstance, candidate: FutureEventCandidate,
+    seed: int, support_fraction: float, min_support_rows: int,
+    min_query_rows: int, min_class_count_per_split: int,
+    cutoff_quantile_min: float, cutoff_quantile_max: float,
+    horizon_fraction_min: float, horizon_fraction_max: float,
+    positive_rate_min: float, positive_rate_max: float,
+    mechanism: TaskMechanism,
+    label_values: Callable[
+        [PhysicalSchema, DatabaseInstance, FutureEventCandidate, int, int],
+        np.ndarray,
+    ],
+) -> PlannedTask | None:
+    """Build a history-gated sub-mode task where only entities with prior
+    history are included in the sample.
+
+    The *label_values* callable returns ``-1`` for entities without history;
+    those rows are excluded from the support/query split.
+    """
+    rng = _rng(seed)
+    event = database.table(candidate.event_table_id)
+    times = event.column(candidate.time_column_id)
+    if len(times) < 2 or int(times.max()) <= int(times.min()):
+        return None
+    cutoff_q = float(rng.uniform(cutoff_quantile_min, cutoff_quantile_max))
+    cutoff = int(np.quantile(times, cutoff_q))
+    desired = float(rng.uniform(positive_rate_min, positive_rate_max))
+    low = cutoff + max(1, round((int(times.max()) - int(times.min())) * horizon_fraction_min))
+    high = cutoff + max(1, round((int(times.max()) - int(times.min())) * horizon_fraction_max))
+    horizon_candidates = np.unique(np.clip(times[(times > cutoff)], low, high))
+    if not len(horizon_candidates):
+        return None
+    best: tuple[float, int, np.ndarray] | None = None
+    for horizon in horizon_candidates:
+        plan_stub = (cutoff, int(horizon))
+        labels = label_values(schema, database, candidate, *plan_stub)
+        # Only consider entities with history (label >= 0) for rate matching.
+        valid_mask = labels >= 0
+        if not np.any(valid_mask):
+            continue
+        valid_labels = labels[valid_mask]
+        item = (abs(float(np.mean(valid_labels)) - desired), int(horizon), labels)
+        if best is None or item[0] < best[0]:
+            best = item
+    if best is None:
+        return None
+    _distance, horizon, labels = best
+    # Filter to only entities with history for the split.
+    valid_mask = labels >= 0
+    valid_indices = np.flatnonzero(valid_mask).astype(np.int64)
+    valid_labels = labels[valid_mask]
+    split = _stratified_split(
+        valid_labels, rng, support_fraction=support_fraction,
+        min_support_rows=min_support_rows, min_query_rows=min_query_rows,
+        min_class_count=min_class_count_per_split,
+    )
+    if split is None:
+        return None
+    valid_support, valid_query = split
+    support = valid_indices[valid_support]
+    query = valid_indices[valid_query]
+    plan = TaskPlan(
+        task_id=task_id, sample_id=sample_id, instance_id=database.instance_id,
+        schema_id=schema.schema_id,
+        mechanism=mechanism,
+        prediction_type=PredictionType.CLASSIFICATION,
+        target_table_id=candidate.entity_table_id,
+        source_table_id=candidate.event_table_id,
+        target_column_id=candidate.target_column_id,
+        foreign_key_id=candidate.foreign_key_id,
+        time_column_id=candidate.time_column_id,
+        cutoff_time=cutoff, horizon_end_time=horizon,
+        split_strategy="stratified_entities", seed=seed,
+        masked_column_ids=(candidate.target_column_id,),
+        observation_rules=_observation_rules(schema, cutoff),
+        route_supervision=_schema_route_labels(
+            schema, target_table_id=candidate.entity_table_id,
+            required_paths=((candidate.foreign_key_id,),),
+        ),
+        classification_kind=ClassificationKind.BINARY,
+        requested_positive_rate=desired,
+        realized_positive_rate=float(np.mean(valid_labels)),
+        parameters=(("cutoff_quantile", cutoff_q), ("support_fraction", support_fraction)),
+    )
+    return _planned_if_visible(
+        schema, database, plan, labels, support, query
+    )
+
+
 def build_future_event_existence_task(
     *, task_id: str, sample_id: str, schema: PhysicalSchema,
     database: DatabaseInstance, candidate: FutureEventCandidate,
@@ -383,6 +473,60 @@ def build_history_gated_future_activity_task(
         positive_rate_max=positive_rate_max,
         mechanism=TaskMechanism.HISTORY_GATED_FUTURE_ACTIVITY,
         label_values=_history_gated_values,
+    )
+
+
+def build_history_gated_future_inactive_task(
+    *, task_id: str, sample_id: str, schema: PhysicalSchema,
+    database: DatabaseInstance, candidate: FutureEventCandidate,
+    seed: int, support_fraction: float, min_support_rows: int,
+    min_query_rows: int, min_class_count_per_split: int,
+    cutoff_quantile_min: float, cutoff_quantile_max: float,
+    horizon_fraction_min: float, horizon_fraction_max: float,
+    positive_rate_min: float = 0.15, positive_rate_max: float = 0.65,
+) -> PlannedTask | None:
+    """Sub-mode 1: only entities with history. Positive = no future events after cutoff."""
+    return _build_history_gated_submode_task(
+        task_id=task_id, sample_id=sample_id, schema=schema,
+        database=database, candidate=candidate, seed=seed,
+        support_fraction=support_fraction, min_support_rows=min_support_rows,
+        min_query_rows=min_query_rows,
+        min_class_count_per_split=min_class_count_per_split,
+        cutoff_quantile_min=cutoff_quantile_min,
+        cutoff_quantile_max=cutoff_quantile_max,
+        horizon_fraction_min=horizon_fraction_min,
+        horizon_fraction_max=horizon_fraction_max,
+        positive_rate_min=positive_rate_min,
+        positive_rate_max=positive_rate_max,
+        mechanism=TaskMechanism.HISTORY_GATED_FUTURE_INACTIVE,
+        label_values=_history_gated_inactive_values,
+    )
+
+
+def build_history_gated_future_active_task(
+    *, task_id: str, sample_id: str, schema: PhysicalSchema,
+    database: DatabaseInstance, candidate: FutureEventCandidate,
+    seed: int, support_fraction: float, min_support_rows: int,
+    min_query_rows: int, min_class_count_per_split: int,
+    cutoff_quantile_min: float, cutoff_quantile_max: float,
+    horizon_fraction_min: float, horizon_fraction_max: float,
+    positive_rate_min: float = 0.15, positive_rate_max: float = 0.65,
+) -> PlannedTask | None:
+    """Sub-mode 2: only entities with history. Positive = has future events after cutoff."""
+    return _build_history_gated_submode_task(
+        task_id=task_id, sample_id=sample_id, schema=schema,
+        database=database, candidate=candidate, seed=seed,
+        support_fraction=support_fraction, min_support_rows=min_support_rows,
+        min_query_rows=min_query_rows,
+        min_class_count_per_split=min_class_count_per_split,
+        cutoff_quantile_min=cutoff_quantile_min,
+        cutoff_quantile_max=cutoff_quantile_max,
+        horizon_fraction_min=horizon_fraction_min,
+        horizon_fraction_max=horizon_fraction_max,
+        positive_rate_min=positive_rate_min,
+        positive_rate_max=positive_rate_max,
+        mechanism=TaskMechanism.HISTORY_GATED_FUTURE_ACTIVE,
+        label_values=_history_gated_active_values,
     )
 
 
@@ -586,6 +730,8 @@ def mechanism_labels(
     if plan.mechanism in {
         TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE,
         TaskMechanism.HISTORY_GATED_FUTURE_ACTIVITY,
+        TaskMechanism.HISTORY_GATED_FUTURE_INACTIVE,
+        TaskMechanism.HISTORY_GATED_FUTURE_ACTIVE,
     }:
         candidate = FutureEventCandidate(
             foreign_key_id=plan.foreign_key_id or "",
@@ -593,11 +739,14 @@ def mechanism_labels(
             event_table_id=plan.source_table_id,
             time_column_id=plan.time_column_id or "",
         )
-        values = (
-            _future_existence_values
-            if plan.mechanism is TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE
-            else _history_gated_values
-        )
+        if plan.mechanism is TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE:
+            values = _future_existence_values
+        elif plan.mechanism is TaskMechanism.HISTORY_GATED_FUTURE_ACTIVITY:
+            values = _history_gated_values
+        elif plan.mechanism is TaskMechanism.HISTORY_GATED_FUTURE_INACTIVE:
+            values = _history_gated_inactive_values
+        else:
+            values = _history_gated_active_values
         return values(
             schema, database, candidate, int(plan.cutoff_time), int(plan.horizon_end_time)
         )
@@ -677,6 +826,60 @@ def _history_gated_values(
         np.unique(assignments[valid & (times > cutoff) & (times <= horizon)])
     ] = True
     return (has_history & ~has_future).astype(np.int8)
+
+
+def _history_gated_inactive_values(
+    schema: PhysicalSchema, database: DatabaseInstance,
+    candidate: FutureEventCandidate, cutoff: int, horizon: int,
+) -> np.ndarray:
+    """Mode 1: only entities with history. Positive = no future events (churned).
+
+    Returns labels of shape ``(entity_count,)`` where ``-1`` marks entities
+    without any history — those are excluded from the support/query split.
+    """
+    fk = _foreign_key(schema, candidate.foreign_key_id)
+    event = database.table(candidate.event_table_id)
+    times = event.column(candidate.time_column_id)
+    assignments = event.column(fk.child_column_id)
+    entity_count = database.table(candidate.entity_table_id).row_count
+    valid = assignments >= 0
+    has_history = np.zeros(entity_count, dtype=bool)
+    has_future = np.zeros(entity_count, dtype=bool)
+    has_history[np.unique(assignments[valid & (times <= cutoff)])] = True
+    has_future[
+        np.unique(assignments[valid & (times > cutoff) & (times <= horizon)])
+    ] = True
+    labels = np.full(entity_count, -1, dtype=np.int8)
+    labels[has_history & ~has_future] = 1
+    labels[has_history & has_future] = 0
+    return labels
+
+
+def _history_gated_active_values(
+    schema: PhysicalSchema, database: DatabaseInstance,
+    candidate: FutureEventCandidate, cutoff: int, horizon: int,
+) -> np.ndarray:
+    """Mode 2: only entities with history. Positive = has future events (retained).
+
+    Returns labels of shape ``(entity_count,)`` where ``-1`` marks entities
+    without any history — those are excluded from the support/query split.
+    """
+    fk = _foreign_key(schema, candidate.foreign_key_id)
+    event = database.table(candidate.event_table_id)
+    times = event.column(candidate.time_column_id)
+    assignments = event.column(fk.child_column_id)
+    entity_count = database.table(candidate.entity_table_id).row_count
+    valid = assignments >= 0
+    has_history = np.zeros(entity_count, dtype=bool)
+    has_future = np.zeros(entity_count, dtype=bool)
+    has_history[np.unique(assignments[valid & (times <= cutoff)])] = True
+    has_future[
+        np.unique(assignments[valid & (times > cutoff) & (times <= horizon)])
+    ] = True
+    labels = np.full(entity_count, -1, dtype=np.int8)
+    labels[has_history & has_future] = 1
+    labels[has_history & ~has_future] = 0
+    return labels
 
 
 def _path_source_scores(
@@ -968,6 +1171,8 @@ __all__ = [
     "future_event_attribute_candidates", "temporal_aggregate_candidates",
     "build_relation_attribute_task", "build_future_event_existence_task",
     "build_history_gated_future_activity_task",
+    "build_history_gated_future_inactive_task",
+    "build_history_gated_future_active_task",
     "build_future_event_attribute_condition_task",
     "build_temporal_relational_aggregate_task", "mechanism_labels",
     "future_event_labels",

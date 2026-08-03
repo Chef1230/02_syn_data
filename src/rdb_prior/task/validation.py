@@ -150,6 +150,8 @@ def validate_task(
     if plan.mechanism in {
         TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE,
         TaskMechanism.HISTORY_GATED_FUTURE_ACTIVITY,
+        TaskMechanism.HISTORY_GATED_FUTURE_INACTIVE,
+        TaskMechanism.HISTORY_GATED_FUTURE_ACTIVE,
     }:
         issues.extend(_validate_future_visibility(schema, task))
     return TaskValidationReport(task_id=plan.task_id, issues=tuple(issues))

@@ -13,6 +13,8 @@ import numpy as np
 class TaskMechanism(str, Enum):
     ENTITY_FUTURE_EVENT_EXISTENCE = "entity_future_event_existence"
     HISTORY_GATED_FUTURE_ACTIVITY = "history_gated_future_activity"
+    HISTORY_GATED_FUTURE_INACTIVE = "history_gated_future_inactive"
+    HISTORY_GATED_FUTURE_ACTIVE = "history_gated_future_active"
     RELATION_ATTRIBUTE = "relation_attribute"
     FUTURE_EVENT_ATTRIBUTE_CONDITION = "future_event_attribute_condition"
     TEMPORAL_RELATIONAL_AGGREGATE = "temporal_relational_aggregate"
@@ -272,7 +274,11 @@ class TaskPlan:
                 raise ValueError("future event existence requires target_column_id")
             if self.target_column_id not in self.masked_column_ids:
                 raise ValueError("future event existence target must be masked")
-        elif self.mechanism is TaskMechanism.HISTORY_GATED_FUTURE_ACTIVITY:
+        elif self.mechanism in {
+            TaskMechanism.HISTORY_GATED_FUTURE_ACTIVITY,
+            TaskMechanism.HISTORY_GATED_FUTURE_INACTIVE,
+            TaskMechanism.HISTORY_GATED_FUTURE_ACTIVE,
+        }:
             if self.prediction_type is not PredictionType.CLASSIFICATION:
                 raise ValueError("history gated future activity must be classification")
             if None in (
