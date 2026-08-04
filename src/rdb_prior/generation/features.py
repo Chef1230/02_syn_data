@@ -219,6 +219,11 @@ def _apply_missing(
     if not column.nullable or missing_rate <= 0:
         return values
     missing = rng.random(len(values)) < missing_rate
+    if len(values) > 0 and missing.all():
+        # validate_database_instance treats a fully-missing column as invalid
+        # (all_missing_feature). Keep one random row observed as a guard; it
+        # only fires when independent per-value masking would wipe the column.
+        missing[rng.integers(len(values))] = False
     if values.dtype.kind in {"U", "S"}:
         width = max(1, values.dtype.itemsize // np.dtype("U1").itemsize)
         result = values.astype(f"<U{width}", copy=True)

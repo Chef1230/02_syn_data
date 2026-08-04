@@ -14,7 +14,7 @@ if str(SRC_ROOT) not in sys.path:
 
 
 from rdb_prior.compilation.compiler import PhysicalSchemaCompiler
-from rdb_prior.compilation.model import ColumnKind, PhysicalDataType
+from rdb_prior.compilation.model import ColumnKind, PhysicalColumn, PhysicalDataType
 from rdb_prior.generation.database import DatabaseGenerator
 from rdb_prior.instance.planner import InstancePlanner, InstancePlannerConfig
 from rdb_prior.runtime import RuntimeContext
@@ -75,6 +75,33 @@ class FeatureGenerationTests(unittest.TestCase):
                     ColumnKind.TIME,
                 }:
                     self.assertIn(values.dtype.kind, {"i", "u"})
+
+    def test_missingness_never_removes_all_observed_values(self) -> None:
+        from rdb_prior.generation.features import _apply_missing
+
+        rng = np.random.default_rng(3)
+        for data_type, values in (
+            (PhysicalDataType.DOUBLE, np.array([1.0, 2.0, 3.0])),
+            (PhysicalDataType.TEXT, np.array(["a", "b", "c"])),
+        ):
+            column = PhysicalColumn(
+                column_id="c",
+                name="c",
+                data_type=data_type,
+                kind=ColumnKind.FEATURE,
+                ordinal=0,
+                nullable=True,
+            )
+            masked = _apply_missing(values, column, rng, 1.0)
+            if data_type is PhysicalDataType.DOUBLE:
+                observed = masked[~np.isnan(masked)]
+            else:
+                observed = masked[masked != ""]
+            self.assertEqual(
+                1,
+                len(observed),
+                "a fully-masked column must keep at least one observed value",
+            )
 
     def test_event_to_event_time_is_strictly_lagged(self) -> None:
         schema, _plan, database = self._generate("time_lag")
