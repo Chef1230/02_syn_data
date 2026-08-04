@@ -468,6 +468,32 @@ class TemplateFallbackTests(unittest.TestCase):
             dataclasses.asdict(bare), dataclasses.asdict(merged)
         )
 
+    def test_yaml_bounds_override_resets_inherited_table_count_prior(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = Path(temporary_directory) / "small.yaml"
+            config_path.write_text(
+                "schema:\n  max_tables: 8\n",
+                encoding="utf-8",
+            )
+            config = load_schema_pipeline_config(config_path)
+
+        # Bounds were overridden without a custom list, so the template's
+        # fixed table-count prior is dropped and a uniform draw is used.
+        self.assertEqual(8, config.sampler.max_tables)
+        self.assertEqual((), config.sampler.table_count_values)
+        self.assertEqual((), config.sampler.table_count_weights)
+
+    def test_null_feature_columns_by_role_clears_template_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_path = Path(temporary_directory) / "noroles.yaml"
+            config_path.write_text(
+                "physical_design:\n  feature_columns_by_role: null\n",
+                encoding="utf-8",
+            )
+            config = load_schema_pipeline_config(config_path)
+
+        self.assertEqual((), config.compiler.feature_columns_by_role)
+
 
 if __name__ == "__main__":
     unittest.main()

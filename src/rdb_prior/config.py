@@ -273,25 +273,42 @@ def load_schema_pipeline_config(
     compiler_defaults = PhysicalCompilerConfig()
     graph_defaults = SchemaGraphConfig()
 
-    distribution_overridden = (
+    cli_bounds_overridden = (
         cli.min_tables is not None or cli.max_tables is not None
     )
-    if distribution_overridden:
+    template_min, template_max, template_values, template_weights = (
+        _template_distribution(config_path)
+    )
+    # A run config that overrides the table-count bounds without supplying
+    # its own prior inherits the template's fixed values, which then fall
+    # outside the new bounds. Reset to a uniform draw in that case; keep
+    # explicitly-configured lists so genuinely inconsistent ones still fail.
+    yaml_bounds_overridden = (
+        schema.get("min_tables", sampler_defaults.min_tables) != template_min
+        or schema.get("max_tables", sampler_defaults.max_tables) != template_max
+    )
+    merged_values = schema.get(
+        "table_count_values", sampler_defaults.table_count_values
+    )
+    merged_weights = schema.get(
+        "table_count_weights", sampler_defaults.table_count_weights
+    )
+    lists_from_template = (
+        isinstance(merged_values, (list, tuple))
+        and tuple(merged_values) == template_values
+        and isinstance(merged_weights, (list, tuple))
+        and tuple(merged_weights) == template_weights
+    )
+    if cli_bounds_overridden or (yaml_bounds_overridden and lists_from_template):
         table_count_values: tuple[int, ...] = ()
         table_count_weights: tuple[int | float, ...] = ()
     else:
         table_count_values = _integer_tuple(
-            schema.get(
-                "table_count_values",
-                sampler_defaults.table_count_values,
-            ),
+            merged_values,
             "config.schema.table_count_values",
         )
         table_count_weights = _numeric_tuple(
-            schema.get(
-                "table_count_weights",
-                sampler_defaults.table_count_weights,
-            ),
+            merged_weights,
             "config.schema.table_count_weights",
         )
 
@@ -1280,6 +1297,47 @@ def _resolve_config_template(path: Path) -> Path | None:
     return candidate
 
 
+def _template_distribution(
+    config_path: Path,
+) -> tuple[int, int, tuple[int, ...], tuple[int | float, ...]]:
+    """``(min_tables, max_tables, table_count_values, table_count_weights)``
+    from the resolved fallback template.
+
+    Falls back to the dataclass defaults when no template applies, i.e. when
+    loading the template itself or when merging is disabled. Used to tell
+    whether a run config overrode the table-count bounds on top of the
+    template's own fixed prior.
+    """
+    defaults = BlueprintSamplerConfig()
+    fallback = (
+        defaults.min_tables,
+        defaults.max_tables,
+        defaults.table_count_values,
+        defaults.table_count_weights,
+    )
+    template_path = _resolve_config_template(config_path)
+    if template_path is None:
+        return fallback
+    document = _read_config_file(template_path)
+    if not isinstance(document, Mapping):
+        return fallback
+    schema = document.get("schema")
+    if not isinstance(schema, Mapping):
+        return fallback
+    values = schema.get("table_count_values", defaults.table_count_values)
+    weights = schema.get("table_count_weights", defaults.table_count_weights)
+    if not isinstance(values, (list, tuple)) or not isinstance(
+        weights, (list, tuple)
+    ):
+        return fallback
+    return (
+        schema.get("min_tables", defaults.min_tables),
+        schema.get("max_tables", defaults.max_tables),
+        tuple(values),
+        tuple(weights),
+    )
+
+
 def _deep_merge(base: Any, override: Any) -> Any:
     """Merge *override* onto *base*.
 
@@ -1404,6 +1462,9 @@ def _motif_weights(
 
 
 def _table_feature_rules(value: Any) -> tuple[TableCountFeatureRule, ...]:
+    if value is None:
+        # Explicit null clears the template's rules (back to fallback columns).
+        return ()
     entries = _sequence(
         value,
         "config.physical_design.feature_columns_by_table_count",
@@ -1435,6 +1496,9 @@ def _table_feature_rules(value: Any) -> tuple[TableCountFeatureRule, ...]:
 
 
 def _role_feature_rules(value: Any) -> tuple[RoleFeatureRule, ...]:
+    if value is None:
+        # Explicit null clears the template's rules (back to fallback columns).
+        return ()
     roles = _mapping(
         value,
         "config.physical_design.feature_columns_by_role",

@@ -92,14 +92,19 @@ physical_design:
 
   # Optional role overrides have precedence over table-count rules.
   # Valid keys are exactly: entity, event, lookup, bridge, detail.
-  feature_columns_by_role: {}
+  # null clears the template's role rules; v1 intentionally keeps none.
+  feature_columns_by_role: null
 
 # Stage 02: bind every physical schema to an executable instance plan.
 instance:
   entity_rows_min: 128
   entity_rows_max: 512
+  entity_rows_distribution: loguniform
+  entity_rows_median: 256
+  entity_rows_log_sigma: 0.8
   lookup_rows_min: 4
   lookup_rows_max: 32
+  lookup_rows_distribution: uniform
   event_fanout_min: 0.75
   event_fanout_max: 4.0
   bridge_rows_factor_min: 0.5
@@ -108,6 +113,12 @@ instance:
   detail_fanout_max: 4.0
   entity_child_factor_min: 0.5
   entity_child_factor_max: 1.5
+
+  # Global per-database size multiplier. uniform keeps sizes tightly clustered
+  # around the base row counts; lognormal adds heavy inter-database variance.
+  population_scale_distribution: uniform
+  population_scale_log_sigma: 0.8
+
   max_rows_per_table: 2048
 
   # One shared latent registry drives both FK choice and feature SCMs.
@@ -207,6 +218,10 @@ instance:
 
   feature_missing_rate_min: 0.02
   feature_missing_rate_max: 0.15
+  # Zero-inflated missingness: no fully-complete-column spike for v1.
+  feature_missing_zero_probability: 0.0
+  feature_missing_beta_alpha: 1.0
+  feature_missing_beta_beta: 1.0
   # RDB-PFN-style hierarchical SCM prior. A database first samples meta
   # hyperparameters; its tables then sample conditional scale/noise values.
   feature_noise_scale_min: 0.0001
@@ -223,6 +238,10 @@ instance:
   scm_long_tail_alpha_max: 2.0
   categorical_cardinality_min: 3
   categorical_cardinality_max: 12
+  # High-cardinality tier stays disabled for the v1 sample config.
+  categorical_high_cardinality_probability: 0.0
+  categorical_high_cardinality_min: 13
+  categorical_high_cardinality_max: 256
   time_scale_seconds_min: 300.0
   time_scale_seconds_max: 86400.0
 
