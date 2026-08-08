@@ -177,6 +177,40 @@ class SchemaConfigTests(unittest.TestCase):
             ):
                 load_instance_pipeline_config(path)
 
+    def test_calendar_and_mechanism_keys_load_and_reject_unknown(self) -> None:
+        instance = load_instance_pipeline_config(
+            PROJECT_ROOT / "configs" / "refactor_v2.yaml"
+        )
+        planner = instance.planner
+        self.assertEqual(1_577_836_800, planner.calendar_start_seconds_min)
+        self.assertEqual(1_735_689_600, planner.calendar_start_seconds_max)
+        self.assertLess(
+            planner.calendar_span_seconds_min,
+            planner.calendar_span_seconds_max,
+        )
+        mechanisms = {
+            mechanism.value: weight
+            for mechanism, weight in planner.event_temporal_mechanism_weights
+        }
+        self.assertEqual(
+            {"stationary", "burst", "churn", "seasonal"},
+            set(mechanisms),
+        )
+        self.assertAlmostEqual(1.0, sum(mechanisms.values()))
+        self.assertEqual(3, planner.burst_max_clusters)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "bad_calendar.yaml"
+            path.write_text(
+                "config_version: 1\ninstance:\n  calendar_frobnicate: 3\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                SchemaConfigError,
+                "unknown option",
+            ):
+                load_instance_pipeline_config(path)
+
     def test_nested_config_resolves_paths_from_project_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             project_root = Path(temporary_directory) / "project"

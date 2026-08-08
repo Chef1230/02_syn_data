@@ -7,6 +7,7 @@ from math import exp, log, sqrt
 
 from rdb_prior.compilation.model import PhysicalForeignKey, PhysicalSchema
 from rdb_prior.instance.plan import (
+    EventTemporalMechanism,
     FeatureSCMFamily,
     InstancePlan,
     PopulationPlan,
@@ -122,6 +123,29 @@ class InstancePlannerConfig:
     categorical_high_cardinality_max: int = 256
     time_scale_seconds_min: float = 300.0
     time_scale_seconds_max: float = 86_400.0
+    # <== 数据库日历区间 (epoch 秒)。事件时间只落在 [start, end] 内。
+    # time_scale_seconds 收窄为基准时间尺度：TIME_LAGGED 的 lag 幅度与
+    # burst/churn 特征时间，不再控制非滞后路径的无界间隔。
+    calendar_start_seconds_min: int = 1_577_836_800  # 2020-01-01
+    calendar_start_seconds_max: int = 1_735_689_600  # 2025-01-01
+    calendar_span_seconds_min: float = 31_536_000.0  # 1 年
+    calendar_span_seconds_max: float = 315_360_000.0  # 10 年
+    # <== 事件时间机制权重 (每张带 TIME 列的表采样一次)。
+    event_temporal_mechanism_weights: tuple[
+        tuple[EventTemporalMechanism, float], ...
+    ] = (
+        (EventTemporalMechanism.STATIONARY, 0.30),
+        (EventTemporalMechanism.BURST, 0.30),
+        (EventTemporalMechanism.CHURN, 0.25),
+        (EventTemporalMechanism.SEASONAL, 0.15),
+    )
+    burst_max_clusters: int = 3
+    burst_cluster_width_min: float = 0.01
+    burst_cluster_width_max: float = 0.12
+    churn_exponent_min: float = 1.2
+    churn_exponent_max: float = 3.0
+    seasonal_period_days_min: int = 30
+    seasonal_period_days_max: int = 365
     scm_weights: tuple[tuple[FeatureSCMFamily, float], ...] = (
         _DEFAULT_SCM_WEIGHTS
     )
@@ -305,6 +329,52 @@ class InstancePlannerConfig:
             self.time_scale_seconds_min,
             self.time_scale_seconds_max,
         )
+        _integer_range(
+            "calendar start seconds",
+            self.calendar_start_seconds_min,
+            self.calendar_start_seconds_max,
+        )
+        if self.calendar_start_seconds_min < 0:
+            raise ValueError("calendar_start_seconds_min must be non-negative")
+        _positive_range(
+            "calendar span seconds",
+            self.calendar_span_seconds_min,
+            self.calendar_span_seconds_max,
+        )
+        _validate_mechanism_weights(
+            self.event_temporal_mechanism_weights,
+            "event_temporal_mechanism_weights",
+        )
+        if self.burst_max_clusters < 1:
+            raise ValueError("burst_max_clusters must be at least 1")
+        _positive_range(
+            "burst cluster width",
+            self.burst_cluster_width_min,
+            self.burst_cluster_width_max,
+        )
+        if not (
+            0
+            < self.burst_cluster_width_min
+            <= self.burst_cluster_width_max
+            < 1
+        ):
+            raise ValueError(
+                "burst cluster width must satisfy 0 < min <= max < 1"
+            )
+        if self.churn_exponent_min <= 1:
+            raise ValueError("churn_exponent_min must be greater than 1")
+        _positive_range(
+            "churn exponent",
+            self.churn_exponent_min,
+            self.churn_exponent_max,
+        )
+        _integer_range(
+            "seasonal period days",
+            self.seasonal_period_days_min,
+            self.seasonal_period_days_max,
+        )
+        if self.seasonal_period_days_min < 1:
+            raise ValueError("seasonal_period_days_min must be positive")
         _validate_scm_weights(self.scm_weights, "scm_weights")
         _validate_root_cause_weights(
             self.root_cause_weights,
@@ -374,6 +444,24 @@ class InstancePlanner:
             )
             for table in schema.tables
         }
+        calendar_rng = runtime.numpy_rng("instance", "calendar")
+        calendar_start = int(
+            calendar_rng.integers(
+                self.config.calendar_start_seconds_min,
+                self.config.calendar_start_seconds_max + 1,
+            )
+        )
+        calendar_span = int(
+            round(
+                exp(
+                    calendar_rng.uniform(
+                        log(self.config.calendar_span_seconds_min),
+                        log(self.config.calendar_span_seconds_max),
+                    )
+                )
+            )
+        )
+        calendar_end = calendar_start + calendar_span
         meta = sample_scm_meta_parameters(
             runtime.numpy_rng("instance", "scm-meta"),
             signal_mean_min=self.config.scm_signal_scale_min,
@@ -411,6 +499,11 @@ class InstancePlanner:
                 incoming[table_id],
                 schema,
             )
+            mechanism = (
+                self._event_mechanism(runtime, table_id)
+                if temporal is not TemporalFamily.NONE
+                else EventTemporalMechanism.STATIONARY
+            )
             role_scm = self.config.scm_prior_for_role(table.role)
             family = self._feature_family(role_scm, runtime, table_id)
             root_cause = self._root_cause_family(
@@ -445,6 +538,7 @@ class InstancePlanner:
                 feature_family=family,
                 root_cause_family=root_cause,
                 temporal_family=temporal,
+                event_mechanism=mechanism,
                 latent_seed=runtime.seed("instance", "latent", table_id),
                 feature_seed=runtime.seed("instance", "feature", table_id),
                 temporal_seed=runtime.seed("instance", "time", table_id),
@@ -467,6 +561,31 @@ class InstancePlanner:
                         ),
                     ),
                 )
+                + (
+                    (
+                        ("burst_max_clusters", float(self.config.burst_max_clusters)),
+                        (
+                            "burst_cluster_width_min",
+                            self.config.burst_cluster_width_min,
+                        ),
+                        (
+                            "burst_cluster_width_max",
+                            self.config.burst_cluster_width_max,
+                        ),
+                        ("churn_exponent_min", self.config.churn_exponent_min),
+                        ("churn_exponent_max", self.config.churn_exponent_max),
+                        (
+                            "seasonal_period_days_min",
+                            float(self.config.seasonal_period_days_min),
+                        ),
+                        (
+                            "seasonal_period_days_max",
+                            float(self.config.seasonal_period_days_max),
+                        ),
+                    )
+                    if temporal is not TemporalFamily.NONE
+                    else ()
+                )
                 + scm_parameters,
             )
 
@@ -481,7 +600,26 @@ class InstancePlanner:
             tables=tuple(table_plans[table_id] for table_id in order),
             relations=relations,
             parameters=meta.parameters,
+            calendar_start_seconds=calendar_start,
+            calendar_end_seconds=calendar_end,
         )
+
+    def _event_mechanism(
+        self,
+        runtime: RuntimeContext,
+        table_id: str,
+    ) -> EventTemporalMechanism:
+        """Sample one bounded event-time mechanism for a temporal table."""
+        rng = runtime.numpy_rng("instance", "event-mechanism", table_id)
+        weights = self.config.event_temporal_mechanism_weights
+        total = sum(weight for _mechanism, weight in weights)
+        draw = rng.uniform(0.0, total)
+        cumulative = 0.0
+        for mechanism, weight in weights:
+            cumulative += weight
+            if draw < cumulative:
+                return mechanism
+        return weights[-1][0]
 
     def _row_count(
         self,
@@ -788,6 +926,24 @@ def _validate_root_cause_weights(
     for family, weight in weights:
         if not isinstance(family, RootCauseFamily):
             raise TypeError(f"{name} keys must be RootCauseFamily")
+        _positive_scalar(f"{name} weight", weight)
+
+
+def _validate_mechanism_weights(
+    weights: tuple[tuple[EventTemporalMechanism, float], ...],
+    name: str,
+) -> None:
+    if not isinstance(weights, tuple) or not weights:
+        raise ValueError(f"{name} must be a non-empty tuple")
+    for item in weights:
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise TypeError(f"{name} items must be mechanism-weight pairs")
+    mechanisms = tuple(mechanism for mechanism, _weight in weights)
+    if len(set(mechanisms)) != len(mechanisms):
+        raise ValueError(f"{name} mechanisms must be unique")
+    for mechanism, weight in weights:
+        if not isinstance(mechanism, EventTemporalMechanism):
+            raise TypeError(f"{name} keys must be EventTemporalMechanism")
         _positive_scalar(f"{name} weight", weight)
 
 

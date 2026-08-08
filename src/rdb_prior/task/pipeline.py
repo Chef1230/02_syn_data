@@ -155,6 +155,7 @@ def generate_tasks(
             schema=schema,
             database=database,
             runtime=runtime,
+            instance_plan=instance_artifact.plan,
         )
         for task in tasks:
             report = validate_task(schema, database, task)

@@ -131,6 +131,129 @@ class FeatureGenerationTests(unittest.TestCase):
             return
         self.fail("event_reference_chain did not produce an Event -> Event FK")
 
+    def test_all_time_columns_stay_within_calendar_interval(self) -> None:
+        schema, plan, database = self._generate("bounded_time")
+        for table in schema.tables:
+            data = database.table(table.table_id)
+            for column in table.columns:
+                if column.kind is not ColumnKind.TIME:
+                    continue
+                values = data.column(column.column_id)
+                self.assertTrue(
+                    np.all(values >= plan.calendar_start_seconds),
+                    f"{table.table_id}.{column.column_id} below calendar start",
+                )
+                self.assertTrue(
+                    np.all(values <= plan.calendar_end_seconds),
+                    f"{table.table_id}.{column.column_id} above calendar end",
+                )
+        self.assertTrue(
+            validate_database_instance(schema, plan, database).is_valid
+        )
+
+    def test_event_span_is_bounded_by_calendar(self) -> None:
+        schema, plan, database = self._generate("bounded_span")
+        calendar_span = plan.calendar_end_seconds - plan.calendar_start_seconds
+        for table in schema.tables:
+            data = database.table(table.table_id)
+            for column in table.columns:
+                if column.kind is not ColumnKind.TIME:
+                    continue
+                values = data.column(column.column_id)
+                self.assertLessEqual(
+                    int(values.max()) - int(values.min()),
+                    calendar_span,
+                )
+
+    def test_time_out_of_calendar_is_reported(self) -> None:
+        schema, plan, database = self._generate("time_out_calendar")
+        corrupted = False
+        for table in schema.tables:
+            data = database.table(table.table_id)
+            for column in table.columns:
+                if column.kind is not ColumnKind.TIME:
+                    continue
+                values = data.column(column.column_id)
+                values[0] = plan.calendar_end_seconds + 1
+                corrupted = True
+                break
+            if corrupted:
+                break
+        self.assertTrue(corrupted)
+        report = validate_database_instance(schema, plan, database)
+        codes = {issue.code for issue in report.issues}
+        self.assertIn("time_out_of_calendar", codes)
+
+    def test_burst_and_churn_mechanisms_produce_varied_shapes(self) -> None:
+        from rdb_prior.generation.features import _mechanism_ticks
+        from rdb_prior.instance.plan import (
+            EventTemporalMechanism,
+            FeatureSCMFamily,
+            PopulationPlan,
+            TableMechanismPlan,
+            TemporalFamily,
+        )
+        from rdb_prior.schema.spec import TableRole
+
+        params = (
+            ("time_scale_seconds", 3600.0),
+            ("burst_max_clusters", 3.0),
+            ("burst_cluster_width_min", 0.01),
+            ("burst_cluster_width_max", 0.12),
+            ("churn_exponent_min", 1.2),
+            ("churn_exponent_max", 3.0),
+            ("seasonal_period_days_min", 30.0),
+            ("seasonal_period_days_max", 365.0),
+        )
+
+        def plan_for(mechanism: EventTemporalMechanism) -> TableMechanismPlan:
+            return TableMechanismPlan(
+                table_id="t",
+                role=TableRole.EVENT,
+                population=PopulationPlan(strategy="s", row_count=1000),
+                latent_dimension=4,
+                feature_family=FeatureSCMFamily.EXOGENOUS,
+                temporal_family=TemporalFamily.PARENT_BURST,
+                event_mechanism=mechanism,
+                latent_seed=1,
+                feature_seed=2,
+                temporal_seed=3,
+                parameters=params,
+            )
+
+        def ticks(mechanism: EventTemporalMechanism) -> np.ndarray:
+            rng = np.random.Generator(np.random.PCG64DXSM(11))
+            return _mechanism_ticks(
+                rng, mechanism, plan_for(mechanism), 2000, 1_000_000
+            )
+
+        stationary = ticks(EventTemporalMechanism.STATIONARY)
+        burst = ticks(EventTemporalMechanism.BURST)
+        churn = ticks(EventTemporalMechanism.CHURN)
+        seasonal = ticks(EventTemporalMechanism.SEASONAL)
+        for label, values in (
+            ("stationary", stationary),
+            ("burst", burst),
+            ("churn", churn),
+            ("seasonal", seasonal),
+        ):
+            self.assertTrue(
+                np.all(values >= 0) and np.all(values <= 1_000_000),
+                f"{label} not bounded in [0, span]",
+            )
+        # Churn concentrates mass at the window start: median and 90th
+        # percentile sit below the stationary values for any exponent > 1.
+        self.assertLess(np.median(churn), np.median(stationary))
+        self.assertLess(np.percentile(churn, 90), np.percentile(stationary, 90))
+        # Bursts create long silences: the largest inter-arrival gap clearly
+        # exceeds the stationary max gap.
+        burst_gaps = np.diff(burst)
+        stationary_gaps = np.diff(stationary)
+        self.assertGreater(
+            float(burst_gaps.max()),
+            2.0 * float(stationary_gaps.max()),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

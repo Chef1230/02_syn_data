@@ -18,6 +18,7 @@ from rdb_prior.generation.model import DatabaseInstance
 from rdb_prior.task.artifacts import TaskArtifact
 from rdb_prior.task.model import PredictionType, TaskMechanism
 from rdb_prior.task.view import TaskView, build_task_view
+from rdb_prior.time_bounds import NS64_MAX_SECONDS, NS64_MIN_SECONDS
 
 from .model import RDBPFNDataset
 
@@ -452,7 +453,19 @@ def _seconds_to_datetime(values: np.ndarray) -> np.ndarray:
     result = np.full(len(numeric), np.datetime64("NaT"), dtype="datetime64[ns]")
     valid = np.isfinite(numeric)
     seconds = numeric[valid].astype(np.int64)
-    result[valid] = seconds.astype("datetime64[s]").astype("datetime64[ns]")
+    if np.any((seconds < NS64_MIN_SECONDS) | (seconds > NS64_MAX_SECONDS)):
+        bad = seconds[(seconds < NS64_MIN_SECONDS) | (seconds > NS64_MAX_SECONDS)][0]
+        raise ValueError(
+            "timestamp seconds outside datetime64[ns] range "
+            f"[{NS64_MIN_SECONDS}, {NS64_MAX_SECONDS}]: {int(bad)}"
+        )
+    representable = seconds >= 0
+    converted = seconds[representable].astype("datetime64[s]").astype(
+        "datetime64[ns]"
+    )
+    target = np.zeros(len(numeric), dtype=bool)
+    target[valid] = representable
+    result[target] = converted
     return result
 
 

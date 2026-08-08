@@ -193,6 +193,23 @@ def validate_database_instance(
         for column in table.columns:
             values = data.column(column.column_id)
             issues.extend(_validate_column(table.table_id, column, values))
+            if (
+                column.kind is ColumnKind.TIME
+                and plan.calendar_start_seconds is not None
+            ):
+                calendar = np.asarray(values, dtype=np.int64)
+                if np.any(
+                    (calendar < plan.calendar_start_seconds)
+                    | (calendar > plan.calendar_end_seconds)
+                ):
+                    issues.append(
+                        _issue(
+                            "time_out_of_calendar",
+                            "TIME value outside database calendar interval",
+                            table_id=table.table_id,
+                            column_id=column.column_id,
+                        )
+                    )
 
     for foreign_key in schema.foreign_keys:
         child = database_tables.get(foreign_key.child_table_id)

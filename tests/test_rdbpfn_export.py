@@ -22,7 +22,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from rdb_prior.artifacts import load_schema_artifact
 from rdb_prior.compilation.compiler import PhysicalSchemaCompiler
-from rdb_prior.export.converter import RDBPFNConverter
+from rdb_prior.export.converter import RDBPFNConverter, _seconds_to_datetime
 from rdb_prior.export.pipeline import RDBPFNExportConfig, export_rdbpfn_tasks
 from rdb_prior.export.validation import validate_rdbpfn_dataset
 from rdb_prior.generation.database import DatabaseGenerator
@@ -362,6 +362,36 @@ class RDBPFNExportTests(unittest.TestCase):
         self.assertEqual(dataset_path.name, dataset.dataset_name)
         self.assertEqual(1, len(dataset.tasks))
         self.assertEqual(task_name, dataset.tasks[0].metadata.name)
+
+    def test_seconds_to_datetime_rejects_out_of_ns_range(self) -> None:
+        from rdb_prior.time_bounds import NS64_MAX_SECONDS
+
+        out_of_range = np.asarray(
+            [1_577_836_800, int(NS64_MAX_SECONDS) + 1_000],
+            dtype=np.int64,
+        )
+        with self.assertRaises(ValueError):
+            _seconds_to_datetime(out_of_range)
+
+    def test_seconds_to_datetime_maps_negative_to_nat(self) -> None:
+        result = _seconds_to_datetime(np.asarray([-1, np.nan, 1_577_836_800]))
+        self.assertTrue(np.isnat(result[0]))
+        self.assertTrue(np.isnat(result[1]))
+        self.assertEqual(
+            result[2],
+            np.datetime64(1_577_836_800, "s").astype("datetime64[ns]"),
+        )
+
+    def test_seconds_to_datetime_handles_ns_bounds(self) -> None:
+        from rdb_prior.time_bounds import NS64_MAX_SECONDS
+
+        result = _seconds_to_datetime(np.asarray([NS64_MAX_SECONDS, 0]))
+        self.assertFalse(np.isnat(result[0]))
+        self.assertFalse(np.isnat(result[1]))
+        self.assertEqual(
+            result[0],
+            np.datetime64(NS64_MAX_SECONDS, "s").astype("datetime64[ns]"),
+        )
 
 
 if __name__ == "__main__":

@@ -16,8 +16,14 @@ from rdb_prior.compilation.model import (
 from rdb_prior.generation.feature_strategies import generate_feature_signal
 from rdb_prior.generation.latent import LatentRegistry
 from rdb_prior.generation.model import TableData
-from rdb_prior.instance.plan import InstancePlan, TableMechanismPlan, TemporalFamily
+from rdb_prior.instance.plan import (
+    EventTemporalMechanism,
+    InstancePlan,
+    TableMechanismPlan,
+    TemporalFamily,
+)
 from rdb_prior.schema.spec import TableRole
+from rdb_prior.time_bounds import assert_within_interval
 
 
 def generate_table_features(
@@ -32,6 +38,10 @@ def generate_table_features(
     table_plan = plan.table(table.table_id)
     rng = np.random.Generator(np.random.PCG64DXSM(table_plan.feature_seed))
     context = _causal_context(schema, table, latents, relations)
+    db_start = plan.calendar_start_seconds
+    db_end = plan.calendar_end_seconds
+    if db_start is None or db_end is None:
+        raise ValueError("instance plan lacks calendar interval")
     values: dict[str, np.ndarray] = {}
 
     for column in table.columns:
@@ -45,6 +55,8 @@ def generate_table_features(
                 table_plan=table_plan,
                 relations=relations,
                 generated_tables=generated_tables,
+                db_start=db_start,
+                db_end=db_end,
             )
             continue
 
@@ -74,6 +86,8 @@ def generate_table_features(
             table.role,
             rng,
             cardinality=int(table_plan.parameter_map["categorical_cardinality"]),
+            db_start=db_start,
+            db_end=db_end,
         )
         values[column.column_id] = _apply_missing(
             encoded,
@@ -111,12 +125,20 @@ def _generate_time(
     table_plan: TableMechanismPlan,
     relations: Mapping[str, np.ndarray],
     generated_tables: Mapping[str, TableData],
+    db_start: int,
+    db_end: int,
 ) -> np.ndarray:
     seed = table_plan.temporal_seed + column.ordinal * 104_729
     rng = np.random.Generator(np.random.PCG64DXSM(seed))
     rows = table_plan.population.row_count
     scale = table_plan.parameter_map["time_scale_seconds"]
-    base_epoch = 1_577_836_800 + int(rng.integers(0, 5 * 365 * 86_400))
+    # Reserve one second of headroom per TIME_LAGGED chain link so a child can
+    # always land strictly after its parent while every value stays inside the
+    # database calendar interval.
+    depth = _max_time_lagged_depth(schema, table.table_id)
+    eff_end = db_end - depth
+    if eff_end - db_start < 2:
+        eff_end = db_start + 2
 
     incoming = tuple(
         foreign_key
@@ -140,11 +162,18 @@ def _generate_time(
             parent_values = generated_tables[parent_table.table_id].column(
                 parent_time.column_id
             )
-            values = np.full(rows, base_epoch, dtype=np.int64)
+            values = np.full(rows, db_start, dtype=np.int64)
             valid = assignments >= 0
             lag = np.maximum(1, rng.lognormal(np.log(scale), 0.8, size=rows))
-            values[valid] = parent_values[assignments[valid]] + lag[valid].astype(
-                np.int64
+            raw = parent_values[assignments[valid]] + lag[valid].astype(np.int64)
+            values[valid] = np.minimum(raw, eff_end)
+            assert_within_interval(
+                values,
+                db_start,
+                db_end,
+                context=(
+                    f"generated TIME {table.table_id}.{column.column_id}"
+                ),
             )
             return values
 
@@ -156,15 +185,149 @@ def _generate_time(
         ),
         np.zeros(rows, dtype=np.int64),
     )
+    mechanism = table_plan.event_mechanism
     values = np.empty(rows, dtype=np.int64)
     for parent_index in np.unique(grouping):
         indices = np.flatnonzero(grouping == parent_index)
-        group_base = base_epoch + int(rng.integers(0, 180 * 86_400))
-        intervals = np.maximum(1, rng.exponential(scale, size=len(indices))).astype(
-            np.int64
-        )
-        values[indices] = group_base + np.cumsum(intervals)
+        group_base = db_start + int(rng.integers(0, max(1, eff_end - db_start)))
+        span = eff_end - group_base
+        ticks = _mechanism_ticks(rng, mechanism, table_plan, len(indices), span)
+        values[indices] = (group_base + ticks).astype(np.int64)
+    assert_within_interval(
+        values,
+        db_start,
+        db_end,
+        context=f"generated TIME {table.table_id}.{column.column_id}",
+    )
     return values
+
+
+def _max_time_lagged_depth(schema: PhysicalSchema, table_id: str) -> int:
+    """Longest temporal-child chain starting at ``table_id``.
+
+    Temporal children (EVENT/DETAIL tables carrying a TIME column) may be
+    ``TIME_LAGGED``, so each chain link needs one second of headroom at the top
+    of the calendar window to keep child times strictly after their parents.
+    ``depth(parent) == 1 + max(depth(children))`` guarantees the parent's
+    effective end stays at least one second below every child's.
+    """
+
+    children = [
+        foreign_key.child_table_id
+        for foreign_key in schema.foreign_keys
+        if foreign_key.parent_table_id == table_id
+        and any(
+            column.kind is ColumnKind.TIME
+            for column in schema.table(foreign_key.child_table_id).columns
+        )
+    ]
+    if not children:
+        return 1
+    return 1 + max(_max_time_lagged_depth(schema, child) for child in children)
+
+
+def _mechanism_ticks(
+    rng: np.random.Generator,
+    mechanism: EventTemporalMechanism,
+    table_plan: TableMechanismPlan,
+    count: int,
+    span: int,
+) -> np.ndarray:
+    """Return ``count`` ascending float offsets inside ``[0, span]``."""
+    if count == 0:
+        return np.empty(0, dtype=np.float64)
+    if mechanism is EventTemporalMechanism.STATIONARY:
+        ticks = np.sort(rng.uniform(size=count))
+        return ticks * span
+    if mechanism is EventTemporalMechanism.BURST:
+        return _burst_ticks(rng, table_plan, count, span)
+    if mechanism is EventTemporalMechanism.CHURN:
+        exponent = rng.uniform(
+            table_plan.parameter_map["churn_exponent_min"],
+            table_plan.parameter_map["churn_exponent_max"],
+        )
+        ticks = rng.uniform(size=count) ** exponent
+        return ticks * span
+    if mechanism is EventTemporalMechanism.SEASONAL:
+        return _seasonal_ticks(rng, table_plan, count, span)
+    raise ValueError(f"unsupported event temporal mechanism: {mechanism}")
+
+
+def _burst_ticks(
+    rng: np.random.Generator,
+    table_plan: TableMechanismPlan,
+    count: int,
+    span: int,
+) -> np.ndarray:
+    """Cluster most arrivals into a few narrow bursts over a quiet background.
+
+    The background pool keeps a sparse uniform floor, while each burst draws
+    from a narrow sub-window, producing dense activity separated by long
+    silence inside the group's calendar window.
+    """
+    max_clusters = int(table_plan.parameter_map["burst_max_clusters"])
+    width_min = table_plan.parameter_map["burst_cluster_width_min"]
+    width_max = table_plan.parameter_map["burst_cluster_width_max"]
+    cluster_count = int(rng.integers(1, max_clusters + 1))
+    weights = np.concatenate(
+        ([0.3], np.full(cluster_count, 0.7 / cluster_count))
+    )
+    allocation = rng.multinomial(count, weights)
+    points: list[np.ndarray] = []
+    background = allocation[0]
+    if background > 0:
+        points.append(rng.uniform(size=background) * span)
+    for index in range(1, cluster_count + 1):
+        members = allocation[index]
+        if members <= 0:
+            continue
+        center = rng.uniform(0.05, 0.95) * span
+        half_width = rng.uniform(width_min, width_max) * span
+        low = max(0.0, center - half_width)
+        high = min(float(span), center + half_width)
+        points.append(rng.uniform(low, high, size=members))
+    ticks = np.concatenate(points) if points else np.empty(0)
+    ticks = np.clip(ticks, 0.0, float(span))
+    return np.sort(ticks)
+
+
+def _seasonal_ticks(
+    rng: np.random.Generator,
+    table_plan: TableMechanismPlan,
+    count: int,
+    span: int,
+) -> np.ndarray:
+    """Arrivals modulated by a sinusoidal calendar intensity (rejection sampling).
+
+    The period is sampled per group and the phase uniformly; a bounded candidate
+    pool is topped up with uniform draws so exactly ``count`` points are emitted
+    inside ``[0, span]``.
+    """
+    period_days = int(
+        rng.integers(
+            int(table_plan.parameter_map["seasonal_period_days_min"]),
+            int(table_plan.parameter_map["seasonal_period_days_max"]) + 1,
+        )
+    )
+    period = period_days * 86_400
+    phase = rng.uniform(0.0, period)
+    amplitude = rng.uniform(0.5, 0.9)
+
+    def intensity(x: np.ndarray) -> np.ndarray:
+        return 1.0 + amplitude * np.sin(2.0 * np.pi * (x + phase) / period)
+
+    max_intensity = 1.0 + amplitude
+    candidate_count = int(np.ceil(count * (1.0 + amplitude))) + 8
+    candidates = rng.uniform(size=candidate_count) * span
+    accepted = candidates[
+        rng.uniform(size=candidate_count)
+        < (intensity(candidates) / max_intensity)
+    ]
+    if accepted.size < count:
+        topup = rng.uniform(size=count - accepted.size) * span
+        accepted = np.concatenate([accepted, topup])
+    ticks = np.sort(accepted[:count])
+    return np.clip(ticks, 0.0, float(span))
 
 
 def _encode_signal(
@@ -174,6 +337,8 @@ def _encode_signal(
     rng: np.random.Generator,
     *,
     cardinality: int,
+    db_start: int,
+    db_end: int,
 ) -> np.ndarray:
     if column.unique:
         order = np.argsort(signal, kind="stable")
@@ -195,7 +360,9 @@ def _encode_signal(
         codes = _quantile_codes(signal, min(cardinality, len(signal)))
         return np.char.add("v", codes.astype(str))
     if column.data_type is PhysicalDataType.TIMESTAMP:
-        return (1_577_836_800 + signal * 86_400).astype(np.int64)
+        return (db_start + signal * 86_400).clip(
+            db_start, db_end
+        ).astype(np.int64)
     raise ValueError(f"unsupported physical data type: {column.data_type}")
 
 

@@ -533,6 +533,85 @@ class TaskGenerationTests(unittest.TestCase):
             )
             self.assertTrue(validate_task(schema, database, task).is_valid)
 
+    def test_task_cutoff_and_horizon_within_calendar_interval(self) -> None:
+        generated: list[TaskPlan] = []
+        for suffix in range(8):
+            sample_id = (
+                "task_calendar_bounds"
+                if suffix == 0
+                else f"task_calendar_bounds_{suffix}"
+            )
+            runtime = RuntimeContext(404).for_sample(sample_id)
+            blueprint = BlueprintSampler(
+                BlueprintSamplerConfig(min_tables=4, max_tables=4)
+            ).sample(sample_id, runtime)
+            schema = PhysicalSchemaCompiler().compile(
+                blueprint, sample_id, runtime
+            )
+            plan = InstancePlanner(
+                InstancePlannerConfig(
+                    entity_rows_min=32,
+                    entity_rows_max=40,
+                    lookup_rows_min=3,
+                    lookup_rows_max=5,
+                    max_rows_per_table=128,
+                )
+            ).plan(
+                sample_id=sample_id,
+                schema=schema,
+                runtime=runtime.child("database-instance"),
+            )
+            database = DatabaseGenerator().generate(schema=schema, plan=plan)
+            try:
+                tasks = TaskPlanner(
+                    TaskPlannerConfig(
+                        tasks_per_database=2,
+                        mechanism_weights=(
+                            (TaskMechanism.ENTITY_FUTURE_EVENT_EXISTENCE, 1.0),
+                        ),
+                        min_support_rows=8,
+                        min_query_rows=4,
+                        min_class_count_per_split=1,
+                        max_attempts_per_database=512,
+                    )
+                ).generate(
+                    sample_id=sample_id,
+                    schema=schema,
+                    database=database,
+                    runtime=runtime.child("task"),
+                    instance_plan=plan,
+                )
+            except ValueError:
+                continue
+            for task in tasks:
+                task_plan = task.plan
+                self.assertEqual(
+                    task_plan.db_start_seconds,
+                    plan.calendar_start_seconds,
+                )
+                self.assertEqual(
+                    task_plan.db_end_seconds,
+                    plan.calendar_end_seconds,
+                )
+                for name in ("cutoff_time", "horizon_end_time"):
+                    value = getattr(task_plan, name)
+                    if value is not None:
+                        self.assertGreaterEqual(
+                            value, task_plan.db_start_seconds
+                        )
+                        self.assertLessEqual(value, task_plan.db_end_seconds)
+                for rule in task_plan.observation_rules:
+                    self.assertGreaterEqual(
+                        rule.max_timestamp, task_plan.db_start_seconds
+                    )
+                    self.assertLessEqual(
+                        rule.max_timestamp, task_plan.db_end_seconds
+                    )
+                generated.append(task_plan)
+            if len(generated) >= 3:
+                break
+        self.assertTrue(generated)
+
 
 if __name__ == "__main__":
     unittest.main()

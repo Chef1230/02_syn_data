@@ -131,6 +131,8 @@ class TaskPlan:
     requested_positive_rate: float | None = None
     realized_positive_rate: float | None = None
     parameters: tuple[tuple[str, float], ...] = ()
+    db_start_seconds: int | None = None
+    db_end_seconds: int | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -225,6 +227,7 @@ class TaskPlan:
         if len(set(route_paths)) != len(route_paths):
             raise ValueError("route_supervision paths must be unique")
         object.__setattr__(self, "parameters", _parameters(self.parameters))
+        self._validate_database_interval()
         self._validate_mechanism_contract()
 
     @property
@@ -251,6 +254,56 @@ class TaskPlan:
                 if label.role is RouteRole.REQUIRED
             ),
         )
+
+    def _validate_database_interval(self) -> None:
+        """Hard-check every task time lies inside the database calendar window.
+
+        When the plan carries the database calendar interval, the task cutoff,
+        horizon and every observation-rule cutoff must fall inside it, and any
+        temporal aggregate window must fit within the interval.
+        """
+        for name in ("db_start_seconds", "db_end_seconds"):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int)
+            ):
+                raise TypeError(f"{name} must be an integer or None")
+        if (self.db_start_seconds is None) != (self.db_end_seconds is None):
+            raise ValueError(
+                "db_start_seconds and db_end_seconds must both be set or both "
+                "be None"
+            )
+        if self.db_start_seconds is None:
+            return
+        if self.db_end_seconds <= self.db_start_seconds:
+            raise ValueError("db_end_seconds must be after db_start_seconds")
+        for name in ("cutoff_time", "horizon_end_time"):
+            value = getattr(self, name)
+            if value is not None and not (
+                self.db_start_seconds <= value <= self.db_end_seconds
+            ):
+                raise ValueError(
+                    f"{name} must lie within the database calendar interval "
+                    f"[{self.db_start_seconds}, {self.db_end_seconds}]"
+                )
+        for rule in self.observation_rules:
+            if not (
+                self.db_start_seconds
+                <= rule.max_timestamp
+                <= self.db_end_seconds
+            ):
+                raise ValueError(
+                    "observation rule max_timestamp must lie within the "
+                    "database calendar interval"
+                )
+        window = self.parameter_map.get("window")
+        if window is not None and not (
+            0 <= window <= (self.db_end_seconds - self.db_start_seconds)
+        ):
+            raise ValueError(
+                "temporal aggregate window must fit inside the database "
+                "calendar interval"
+            )
 
     def _validate_mechanism_contract(self) -> None:
         if self.mechanism is TaskMechanism.RELATION_ATTRIBUTE:
@@ -345,6 +398,8 @@ class TaskPlan:
             "requested_positive_rate": self.requested_positive_rate,
             "realized_positive_rate": self.realized_positive_rate,
             "parameters": dict(self.parameters),
+            "db_start_seconds": self.db_start_seconds,
+            "db_end_seconds": self.db_end_seconds,
         }
 
     @classmethod
@@ -396,6 +451,8 @@ class TaskPlan:
             requested_positive_rate=data.get("requested_positive_rate"),
             realized_positive_rate=data.get("realized_positive_rate"),
             parameters=tuple(data.get("parameters", {}).items()),
+            db_start_seconds=data.get("db_start_seconds"),
+            db_end_seconds=data.get("db_end_seconds"),
         )
 
 

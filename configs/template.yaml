@@ -307,8 +307,35 @@ instance:
   categorical_high_cardinality_max: 2000
 
   # <== 分布参数: 事件时间尺度 (秒)。60 = 1 分钟, 2592000 = 30 天。
+  # 语义已收窄为基准时间尺度: TIME_LAGGED 的 lag 幅度与 burst/churn 特征时间;
+  # 非滞后路径的间隔由数据库日历区间 + 事件时间机制决定。
   time_scale_seconds_min: 60.0
   time_scale_seconds_max: 2592000.0
+
+  # <== 数据库日历区间 (epoch 秒)。事件时间只落在 [start, end] 内。
+  # 起点 2020-01-01 ~ 2025-01-01; 跨度 1 ~ 10 年 (对数均匀)。
+  calendar_start_seconds_min: 1577836800
+  calendar_start_seconds_max: 1735689600
+  calendar_span_seconds_min: 31536000.0
+  calendar_span_seconds_max: 315360000.0
+
+  # <== 事件时间机制权重 (每张带 TIME 列的表采样一次):
+  #   stationary 平稳     = 窗口内均匀序统计 (有界泊松)
+  #   burst      爆发     = 少数密集簇 + 背景噪声, 簇间长期沉默
+  #   churn      流失     = 密度集中在窗口起点, 活动衰减、尾部沉默
+  #   seasonal   季节     = 正弦强度拒绝采样, 周期性
+  event_temporal_mechanism_weights:
+    stationary: 0.30
+    burst: 0.30
+    churn: 0.25
+    seasonal: 0.15
+  burst_max_clusters: 3               # 每组最多爆发簇数
+  burst_cluster_width_min: 0.01       # 簇宽占窗口比例下限
+  burst_cluster_width_max: 0.12       # 簇宽占窗口比例上限
+  churn_exponent_min: 1.2             # 衰减指数下界 (>1)
+  churn_exponent_max: 3.0             # 衰减指数上界
+  seasonal_period_days_min: 30        # 季节周期 (天)
+  seasonal_period_days_max: 365
 
 # Stage 02 运行参数
 instance_generation:

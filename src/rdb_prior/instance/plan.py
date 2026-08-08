@@ -39,6 +39,23 @@ class TemporalFamily(str, Enum):
     TIME_LAGGED = "time_lagged"
 
 
+class EventTemporalMechanism(str, Enum):
+    """Shape of the per-group event-time process inside the calendar window.
+
+    ``PARENT_BURST``/``TIME_LAGGED`` tables both sample one mechanism; it
+    controls how the rows of each parent group are spread over its sub-window.
+    ``STATIONARY`` is a bounded homogeneous process; ``BURST`` clusters
+    arrivals into a few dense bursts separated by long silence; ``CHURN``
+    concentrates arrivals early (activity decays, so future events thin out);
+    ``SEASONAL`` modulates intensity with a periodic calendar component.
+    """
+
+    STATIONARY = "stationary"
+    BURST = "burst"
+    CHURN = "churn"
+    SEASONAL = "seasonal"
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PopulationPlan:
     strategy: str
@@ -71,6 +88,7 @@ class TableMechanismPlan:
     feature_seed: int
     temporal_seed: int
     root_cause_family: RootCauseFamily = RootCauseFamily.STANDARD_NORMAL
+    event_mechanism: EventTemporalMechanism = EventTemporalMechanism.STATIONARY
     parameters: tuple[tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
@@ -86,6 +104,8 @@ class TableMechanismPlan:
             raise TypeError("root_cause_family must be RootCauseFamily")
         if not isinstance(self.temporal_family, TemporalFamily):
             raise TypeError("temporal_family must be TemporalFamily")
+        if not isinstance(self.event_mechanism, EventTemporalMechanism):
+            raise TypeError("event_mechanism must be EventTemporalMechanism")
         for name in ("latent_seed", "feature_seed", "temporal_seed"):
             _seed(name, getattr(self, name))
         object.__setattr__(self, "parameters", _parameters(self.parameters))
@@ -146,6 +166,8 @@ class InstancePlan:
     tables: tuple[TableMechanismPlan, ...]
     relations: tuple[RelationMechanismPlan, ...]
     parameters: tuple[tuple[str, float], ...] = ()
+    calendar_start_seconds: int | None = None
+    calendar_end_seconds: int | None = None
 
     def __post_init__(self) -> None:
         for name in ("plan_id", "sample_id", "schema_id", "blueprint_id"):
@@ -172,6 +194,26 @@ class InstancePlan:
         )
         if len(set(relation_ids)) != len(relation_ids):
             raise ValueError("relation group IDs must be unique")
+        for name in ("calendar_start_seconds", "calendar_end_seconds"):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int)
+            ):
+                raise TypeError(f"{name} must be an integer or None")
+        if (self.calendar_start_seconds is None) != (
+            self.calendar_end_seconds is None
+        ):
+            raise ValueError(
+                "calendar_start_seconds and calendar_end_seconds must both be "
+                "set or both be None"
+            )
+        if (
+            self.calendar_start_seconds is not None
+            and self.calendar_end_seconds <= self.calendar_start_seconds
+        ):
+            raise ValueError(
+                "calendar_end_seconds must be after calendar_start_seconds"
+            )
         object.__setattr__(self, "parameters", _parameters(self.parameters))
 
     def table(self, table_id: str) -> TableMechanismPlan:
@@ -202,6 +244,7 @@ class InstancePlan:
                     "feature_family": table.feature_family.value,
                     "root_cause_family": table.root_cause_family.value,
                     "temporal_family": table.temporal_family.value,
+                    "event_mechanism": table.event_mechanism.value,
                     "latent_seed": table.latent_seed,
                     "feature_seed": table.feature_seed,
                     "temporal_seed": table.temporal_seed,
@@ -223,6 +266,8 @@ class InstancePlan:
                 for relation in self.relations
             ],
             "parameters": dict(self.parameters),
+            "calendar_start_seconds": self.calendar_start_seconds,
+            "calendar_end_seconds": self.calendar_end_seconds,
         }
 
     @classmethod
@@ -247,6 +292,9 @@ class InstancePlan:
                         item.get("root_cause_family", "standard_normal")
                     ),
                     temporal_family=TemporalFamily(item["temporal_family"]),
+                    event_mechanism=EventTemporalMechanism(
+                        item.get("event_mechanism", "stationary")
+                    ),
                     latent_seed=item["latent_seed"],
                     feature_seed=item["feature_seed"],
                     temporal_seed=item["temporal_seed"],
@@ -276,6 +324,8 @@ class InstancePlan:
             tables=tuple(table_values),
             relations=relation_values,
             parameters=tuple(data.get("parameters", {}).items()),
+            calendar_start_seconds=data.get("calendar_start_seconds"),
+            calendar_end_seconds=data.get("calendar_end_seconds"),
         )
 
 

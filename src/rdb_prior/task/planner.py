@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from rdb_prior.compilation.model import PhysicalSchema
 from rdb_prior.generation.model import DatabaseInstance
+from rdb_prior.instance.plan import InstancePlan
 from rdb_prior.runtime import RuntimeContext
 from rdb_prior.task.mechanisms import (
     build_future_event_attribute_condition_task,
@@ -91,6 +92,7 @@ class TaskPlanner:
     def generate(
         self, *, sample_id: str, schema: PhysicalSchema,
         database: DatabaseInstance, runtime: RuntimeContext,
+        instance_plan: InstancePlan | None = None,
     ) -> tuple[PlannedTask, ...]:
         pools: dict[TaskMechanism, list[object]] = {
             TaskMechanism.RELATION_ATTRIBUTE: list(
@@ -194,6 +196,18 @@ class TaskPlanner:
             if task is None or task.plan.signature in signatures:
                 continue
             signatures.add(task.plan.signature)
+            if (
+                instance_plan is not None
+                and instance_plan.calendar_start_seconds is not None
+            ):
+                task = replace(
+                    task,
+                    plan=replace(
+                        task.plan,
+                        db_start_seconds=instance_plan.calendar_start_seconds,
+                        db_end_seconds=instance_plan.calendar_end_seconds,
+                    ),
+                )
             generated.append(task)
         if self.config.require_full_task_count and len(generated) != self.config.tasks_per_database:
             raise ValueError(

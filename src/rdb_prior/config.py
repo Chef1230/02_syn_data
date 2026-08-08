@@ -20,7 +20,11 @@ from rdb_prior.compilation.compiler import (
     TableCountFeatureRule,
 )
 from rdb_prior.export.pipeline import RDBPFNExportConfig
-from rdb_prior.instance.plan import FeatureSCMFamily, RootCauseFamily
+from rdb_prior.instance.plan import (
+    EventTemporalMechanism,
+    FeatureSCMFamily,
+    RootCauseFamily,
+)
 from rdb_prior.instance.planner import InstancePlannerConfig, RoleSCMPrior
 from rdb_prior.pipeline import InstancePipelineConfig, SchemaPipelineConfig
 from rdb_prior.routing.config import (
@@ -557,6 +561,18 @@ _INSTANCE_OPTIONS = {
     "categorical_high_cardinality_max",
     "time_scale_seconds_min",
     "time_scale_seconds_max",
+    "calendar_start_seconds_min",
+    "calendar_start_seconds_max",
+    "calendar_span_seconds_min",
+    "calendar_span_seconds_max",
+    "event_temporal_mechanism_weights",
+    "burst_max_clusters",
+    "burst_cluster_width_min",
+    "burst_cluster_width_max",
+    "churn_exponent_min",
+    "churn_exponent_max",
+    "seasonal_period_days_min",
+    "seasonal_period_days_max",
     "scm_weights",
     "role_scm",
     "mlp_depth_min",
@@ -731,6 +747,13 @@ def load_instance_pipeline_config(
         RootCauseFamily,
         "config.instance.root_cause_weights",
     )
+    mechanism_weights = _weight_mapping(
+        instance.get("event_temporal_mechanism_weights"),
+        defaults.event_temporal_mechanism_weights,
+        EventTemporalMechanism,
+        "config.instance.event_temporal_mechanism_weights",
+        sort_keys=True,
+    )
     role_scm = _role_scm_mapping(
         instance.get("role_scm"),
         scm_weights=scm_weights,
@@ -754,6 +777,7 @@ def load_instance_pipeline_config(
                 "scm_weights",
                 "root_cause_weights",
                 "role_scm",
+                "event_temporal_mechanism_weights",
             }
         }
         planner = InstancePlannerConfig(
@@ -761,6 +785,7 @@ def load_instance_pipeline_config(
             scm_weights=scm_weights,
             root_cause_weights=root_cause_weights,
             role_scm=role_scm,
+            event_temporal_mechanism_weights=mechanism_weights,
         )
         return InstancePipelineConfig(
             schema_manifest=_resolve_output_root(

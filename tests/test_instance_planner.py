@@ -154,6 +154,58 @@ class InstancePlannerTests(unittest.TestCase):
             },
         )
 
+    def test_calendar_interval_is_bounded_and_serialized(self) -> None:
+        schema, plan = self._plan("calendar_interval")
+        self.assertIsNotNone(plan.calendar_start_seconds)
+        self.assertIsNotNone(plan.calendar_end_seconds)
+        self.assertGreater(plan.calendar_end_seconds, plan.calendar_start_seconds)
+        config = InstancePlannerConfig()
+        span_min = config.calendar_span_seconds_min
+        span_max = config.calendar_span_seconds_max
+        self.assertGreaterEqual(
+            plan.calendar_end_seconds - plan.calendar_start_seconds,
+            round(span_min),
+        )
+        self.assertLessEqual(
+            plan.calendar_end_seconds - plan.calendar_start_seconds,
+            round(span_max),
+        )
+        restored = InstancePlan.from_dict(plan.to_dict())
+        self.assertEqual(restored, plan)
+        self.assertEqual(
+            restored.calendar_start_seconds,
+            plan.calendar_start_seconds,
+        )
+        self.assertTrue(validate_instance_plan(schema, plan).is_valid)
+
+    def test_calendar_interval_missing_is_legacy_safe(self) -> None:
+        _schema, plan = self._plan("legacy_calendar")
+        payload = plan.to_dict()
+        del payload["calendar_start_seconds"]
+        del payload["calendar_end_seconds"]
+        restored = InstancePlan.from_dict(payload)
+        self.assertIsNone(restored.calendar_start_seconds)
+        self.assertIsNone(restored.calendar_end_seconds)
+
+    def test_event_mechanisms_are_sampled_from_weights(self) -> None:
+        schema, plan = self._plan("event_mechanism")
+        temporal = [
+            table
+            for table in plan.tables
+            if table.temporal_family is not TemporalFamily.NONE
+        ]
+        self.assertTrue(temporal)
+        for table in temporal:
+            self.assertIn(
+                table.event_mechanism.value,
+                {
+                    "stationary",
+                    "burst",
+                    "churn",
+                    "seasonal",
+                },
+            )
+
     def test_role_mechanisms_and_root_constraints(self) -> None:
         schema, plan = self._plan("role_mechanisms")
         for table_plan in plan.tables:
