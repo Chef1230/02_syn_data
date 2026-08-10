@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import logging
 
 from rdb_prior.compilation.model import PhysicalSchema
 from rdb_prior.generation.model import DatabaseInstance
@@ -32,6 +33,9 @@ _DEFAULT_MECHANISM_WEIGHTS = (
     (TaskMechanism.FUTURE_EVENT_ATTRIBUTE_CONDITION, 0.20),
     (TaskMechanism.TEMPORAL_RELATIONAL_AGGREGATE, 0.20),
 )
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -118,6 +122,7 @@ class TaskPlanner:
         mechanisms, weights = zip(*self.config.mechanism_weights)
         generated: list[PlannedTask] = []
         signatures: set[tuple[object, ...]] = set()
+        calendar_rejections = 0
         for attempt in range(self.config.max_attempts_per_database):
             if len(generated) >= self.config.tasks_per_database:
                 break
@@ -193,28 +198,77 @@ class TaskPlanner:
                     positive_rate_min=self.config.positive_rate_min,
                     positive_rate_max=self.config.positive_rate_max,
                 )
-            if task is None or task.plan.signature in signatures:
+            if task is None:
+                continue
+            task = _bind_instance_calendar(task, instance_plan)
+            if task is None:
+                calendar_rejections += 1
+                continue
+            if task.plan.signature in signatures:
                 continue
             signatures.add(task.plan.signature)
-            if (
-                instance_plan is not None
-                and instance_plan.calendar_start_seconds is not None
-            ):
-                task = replace(
-                    task,
-                    plan=replace(
-                        task.plan,
-                        db_start_seconds=instance_plan.calendar_start_seconds,
-                        db_end_seconds=instance_plan.calendar_end_seconds,
-                    ),
-                )
             generated.append(task)
         if self.config.require_full_task_count and len(generated) != self.config.tasks_per_database:
+            detail = (
+                f"; rejected {calendar_rejections} candidate(s) whose time "
+                "fields were outside the instance calendar"
+                if calendar_rejections
+                else ""
+            )
             raise ValueError(
                 f"database {sample_id!r} yielded {len(generated)} valid tasks; "
-                f"required {self.config.tasks_per_database}"
+                f"required {self.config.tasks_per_database}{detail}"
             )
         return tuple(generated)
+
+
+def _bind_instance_calendar(
+    task: PlannedTask,
+    instance_plan: InstancePlan | None,
+) -> PlannedTask | None:
+    """Attach an instance calendar without allowing invalid task plans through.
+
+    Task mechanisms are intentionally generated from observed timestamps and
+    therefore do not need to know the instance plan while calculating labels.
+    Before adding the hard database bounds, however, reject a candidate whose
+    cutoff, horizon, observation rule, or aggregate window is inconsistent with
+    those bounds.  Rejecting lets the planner try another candidate; clipping
+    would silently change the task labels and data semantics.
+    """
+    if instance_plan is None or instance_plan.calendar_start_seconds is None:
+        return task
+    start = instance_plan.calendar_start_seconds
+    end = instance_plan.calendar_end_seconds
+    assert end is not None
+    plan = task.plan
+    invalid_fields: list[str] = []
+    for name in ("cutoff_time", "horizon_end_time"):
+        value = getattr(plan, name)
+        if value is not None and not start <= value <= end:
+            invalid_fields.append(name)
+    for index, rule in enumerate(plan.observation_rules):
+        if not start <= rule.max_timestamp <= end:
+            invalid_fields.append(f"observation_rules[{index}].max_timestamp")
+    window = plan.parameter_map.get("window")
+    if window is not None and not 0 <= window <= end - start:
+        invalid_fields.append("window")
+    if invalid_fields:
+        _LOGGER.debug(
+            "skipping task candidate %s for calendar [%d, %d]: %s",
+            plan.task_id,
+            start,
+            end,
+            ", ".join(invalid_fields),
+        )
+        return None
+    return replace(
+        task,
+        plan=replace(
+            plan,
+            db_start_seconds=start,
+            db_end_seconds=end,
+        ),
+    )
 
 
 def _fraction_range(name: str, low: float, high: float) -> None:

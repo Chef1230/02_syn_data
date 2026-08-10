@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 import sys
@@ -35,7 +36,11 @@ from rdb_prior.task.mechanisms import (
 )
 from rdb_prior.task.model import RouteRole, TaskMechanism, TaskPlan
 from rdb_prior.task.pipeline import TaskPipelineConfig, generate_tasks
-from rdb_prior.task.planner import TaskPlanner, TaskPlannerConfig
+from rdb_prior.task.planner import (
+    TaskPlanner,
+    TaskPlannerConfig,
+    _bind_instance_calendar,
+)
 from rdb_prior.task.validation import validate_task
 from rdb_prior.task.view import build_task_view
 
@@ -611,6 +616,41 @@ class TaskGenerationTests(unittest.TestCase):
             if len(generated) >= 3:
                 break
         self.assertTrue(generated)
+
+    def test_calendar_binding_rejects_invalid_candidate_without_clipping(self) -> None:
+        runtime, schema, database = self._database("calendar_binding")
+        instance_plan = InstancePlanner(
+            InstancePlannerConfig(
+                entity_rows_min=32,
+                entity_rows_max=40,
+                lookup_rows_min=3,
+                lookup_rows_max=5,
+                max_rows_per_table=128,
+            )
+        ).plan(
+            sample_id="calendar_binding",
+            schema=schema,
+            runtime=runtime.child("database-instance"),
+        )
+        task = TaskPlanner(
+            TaskPlannerConfig(
+                tasks_per_database=1,
+                mechanism_weights=((TaskMechanism.RELATION_ATTRIBUTE, 1.0),),
+                min_support_rows=8,
+                min_query_rows=4,
+            )
+        ).generate(
+            sample_id="calendar_binding",
+            schema=schema,
+            database=database,
+            runtime=runtime.child("task"),
+        )[0]
+
+        invalid = replace(
+            task,
+            plan=replace(task.plan, cutoff_time=0),
+        )
+        self.assertIsNone(_bind_instance_calendar(invalid, instance_plan))
 
 
 if __name__ == "__main__":
