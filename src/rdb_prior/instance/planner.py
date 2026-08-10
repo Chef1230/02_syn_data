@@ -121,6 +121,14 @@ class InstancePlannerConfig:
     categorical_high_cardinality_probability: float = 0.0
     categorical_high_cardinality_min: int = 13
     categorical_high_cardinality_max: int = 256
+    # Categorical columns are softmax-sampled per row from signal logits plus
+    # a per-table Dirichlet class prior. alpha controls class-frequency
+    # imbalance (smaller -> concentrated on few classes); strength controls how
+    # strongly the signal drives the category. Both are drawn log-uniformly.
+    categorical_dirichlet_alpha_min: float = 0.1
+    categorical_dirichlet_alpha_max: float = 1.0
+    categorical_signal_strength_min: float = 0.5
+    categorical_signal_strength_max: float = 2.0
     time_scale_seconds_min: float = 300.0
     time_scale_seconds_max: float = 86_400.0
     # <== 数据库日历区间 (epoch 秒)。事件时间只落在 [start, end] 内。
@@ -324,6 +332,16 @@ class InstancePlannerConfig:
                 "high categorical cardinality range must start above the "
                 "ordinary range"
             )
+        _positive_range(
+            "categorical dirichlet alpha",
+            self.categorical_dirichlet_alpha_min,
+            self.categorical_dirichlet_alpha_max,
+        )
+        _positive_range(
+            "categorical signal strength",
+            self.categorical_signal_strength_min,
+            self.categorical_signal_strength_max,
+        )
         _positive_range(
             "time scale seconds",
             self.time_scale_seconds_min,
@@ -548,6 +566,14 @@ class InstancePlanner:
                         float(self._categorical_cardinality(parameter_rng)),
                     ),
                     (
+                        "categorical_dirichlet_alpha",
+                        self._categorical_dirichlet_alpha(parameter_rng),
+                    ),
+                    (
+                        "categorical_signal_strength",
+                        self._categorical_signal_strength(parameter_rng),
+                    ),
+                    (
                         "missing_rate",
                         self._missing_rate(parameter_rng),
                     ),
@@ -751,6 +777,26 @@ class InstancePlanner:
             low = self.config.categorical_cardinality_min
             high = self.config.categorical_cardinality_max
         return int(round(exp(rng.uniform(log(low), log(high + 1)))))
+
+    def _categorical_dirichlet_alpha(self, rng) -> float:
+        return float(
+            exp(
+                rng.uniform(
+                    log(self.config.categorical_dirichlet_alpha_min),
+                    log(self.config.categorical_dirichlet_alpha_max),
+                )
+            )
+        )
+
+    def _categorical_signal_strength(self, rng) -> float:
+        return float(
+            exp(
+                rng.uniform(
+                    log(self.config.categorical_signal_strength_min),
+                    log(self.config.categorical_signal_strength_max),
+                )
+            )
+        )
 
     def _feature_family(
         self,

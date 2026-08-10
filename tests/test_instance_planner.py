@@ -243,6 +243,30 @@ class InstancePlannerTests(unittest.TestCase):
             self.assertGreater(table_plan.parameter_map["output_scale"], 0)
             self.assertGreater(table_plan.parameter_map["long_tail_alpha"], 1)
 
+    def test_categorical_probability_params_are_planned_and_bounded(self) -> None:
+        _schema, plan = self._plan("categorical_probability")
+        config = InstancePlannerConfig()
+        for table_plan in plan.tables:
+            parameters = table_plan.parameter_map
+            self.assertIn("categorical_dirichlet_alpha", parameters)
+            self.assertIn("categorical_signal_strength", parameters)
+            self.assertGreaterEqual(
+                parameters["categorical_dirichlet_alpha"],
+                config.categorical_dirichlet_alpha_min,
+            )
+            self.assertLessEqual(
+                parameters["categorical_dirichlet_alpha"],
+                config.categorical_dirichlet_alpha_max,
+            )
+            self.assertGreaterEqual(
+                parameters["categorical_signal_strength"],
+                config.categorical_signal_strength_min,
+            )
+            self.assertLessEqual(
+                parameters["categorical_signal_strength"],
+                config.categorical_signal_strength_max,
+            )
+
     def test_meta_prior_varies_across_databases_and_prefers_low_noise(self) -> None:
         noise_means: list[float] = []
         signal_means: list[float] = []

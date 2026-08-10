@@ -24,7 +24,7 @@ from rdb_prior.validation.checks import validate_database_instance
 
 
 class FeatureGenerationTests(unittest.TestCase):
-    def _generate(self, sample_id: str):
+    def _generate(self, sample_id: str, **config_overrides):
         runtime = RuntimeContext(121).for_sample(sample_id)
         blueprint = BlueprintSampler(
             BlueprintSamplerConfig(
@@ -41,6 +41,7 @@ class FeatureGenerationTests(unittest.TestCase):
                 lookup_rows_min=4,
                 lookup_rows_max=6,
                 max_rows_per_table=80,
+                **config_overrides,
             )
         ).plan(
             sample_id=sample_id,
@@ -102,6 +103,119 @@ class FeatureGenerationTests(unittest.TestCase):
                 len(observed),
                 "a fully-masked column must keep at least one observed value",
             )
+
+    def test_softmax_codes_shape_dtype_range_and_determinism(self) -> None:
+        from rdb_prior.generation.features import _softmax_codes
+
+        signal = np.linspace(-3.0, 3.0, 100)
+        codes = _softmax_codes(
+            signal,
+            5,
+            np.random.default_rng(0),
+            dirichlet_alpha=0.5,
+            signal_strength=1.0,
+        )
+        self.assertEqual((100,), codes.shape)
+        self.assertEqual(np.int64, codes.dtype)
+        self.assertTrue(np.all(codes >= 0) and np.all(codes < 5))
+        again = _softmax_codes(
+            signal,
+            5,
+            np.random.default_rng(0),
+            dirichlet_alpha=0.5,
+            signal_strength=1.0,
+        )
+        np.testing.assert_equal(codes, again)
+
+    def test_softmax_codes_edge_cardinality_and_empty(self) -> None:
+        from rdb_prior.generation.features import _softmax_codes
+
+        rng = np.random.default_rng(4)
+        single = _softmax_codes(
+            np.ones(7),
+            1,
+            rng,
+            dirichlet_alpha=0.5,
+            signal_strength=1.0,
+        )
+        self.assertTrue(np.all(single == 0))
+        empty = _softmax_codes(
+            np.array([]),
+            5,
+            rng,
+            dirichlet_alpha=0.5,
+            signal_strength=1.0,
+        )
+        self.assertEqual((0,), empty.shape)
+        self.assertEqual(np.int64, empty.dtype)
+
+    def test_softmax_codes_keep_signal_to_category_link(self) -> None:
+        from rdb_prior.generation.features import _softmax_codes
+
+        signal = np.concatenate(
+            [np.linspace(-3.0, -1.0, 100), np.linspace(1.0, 3.0, 100)]
+        )
+        codes = _softmax_codes(
+            signal,
+            5,
+            np.random.default_rng(1),
+            dirichlet_alpha=1.0,
+            signal_strength=1_000_000.0,
+        )
+        negative = np.unique(codes[signal < 0])
+        positive = np.unique(codes[signal > 0])
+        # With huge strength the signal term dominates the Dirichlet prior and
+        # the Gumbel noise: negative-signal rows map to argmin(projection) and
+        # positive-signal rows to argmax(projection) — two distinct categories.
+        self.assertEqual(1, len(negative))
+        self.assertEqual(1, len(positive))
+        self.assertNotEqual(negative[0], positive[0])
+
+    def test_softmax_codes_produce_class_imbalance(self) -> None:
+        from rdb_prior.generation.features import _softmax_codes
+
+        codes = _softmax_codes(
+            np.zeros(4000),
+            8,
+            np.random.default_rng(2),
+            dirichlet_alpha=0.05,
+            signal_strength=0.0,
+        )
+        # With zero strength, Gumbel-max over log(class_prior) samples exactly
+        # from the Dirichlet-drawn prior, so a small alpha concentrates mass.
+        _, counts = np.unique(codes, return_counts=True)
+        self.assertGreater(float(counts.max()) / len(codes), 0.3)
+
+    def test_categorical_probability_generation_is_valid(self) -> None:
+        schema, plan, database = self._generate(
+            "categorical_probability",
+            categorical_dirichlet_alpha_min=0.1,
+            categorical_dirichlet_alpha_max=0.1,
+            categorical_signal_strength_min=2.0,
+            categorical_signal_strength_max=2.0,
+        )
+        self.assertTrue(
+            validate_database_instance(schema, plan, database).is_valid
+        )
+        for table in schema.tables:
+            data = database.table(table.table_id)
+            table_plan = plan.table(table.table_id)
+            cardinality = int(
+                table_plan.parameter_map["categorical_cardinality"]
+            )
+            for column in table.columns:
+                if column.data_type is not PhysicalDataType.TEXT:
+                    continue
+                observed = data.column(column.column_id)
+                observed = observed[observed != ""]
+                if len(observed) == 0:
+                    continue
+                categories = len(np.unique(observed))
+                self.assertGreaterEqual(categories, 1)
+                self.assertLessEqual(
+                    categories,
+                    min(cardinality, len(observed)),
+                )
 
     def test_event_to_event_time_is_strictly_lagged(self) -> None:
         schema, _plan, database = self._generate("time_lag")

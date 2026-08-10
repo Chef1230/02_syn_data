@@ -27,6 +27,7 @@ from rdb_prior.config import (
     load_rdbpfn_export_config,
     load_task_pipeline_config,
 )
+from rdb_prior.instance.planner import InstancePlannerConfig
 
 
 class SchemaConfigTests(unittest.TestCase):
@@ -52,6 +53,22 @@ class SchemaConfigTests(unittest.TestCase):
         self.assertEqual(
             0.12,
             instance.planner.categorical_high_cardinality_probability,
+        )
+        self.assertEqual(
+            0.1,
+            instance.planner.categorical_dirichlet_alpha_min,
+        )
+        self.assertEqual(
+            1.0,
+            instance.planner.categorical_dirichlet_alpha_max,
+        )
+        self.assertEqual(
+            0.5,
+            instance.planner.categorical_signal_strength_min,
+        )
+        self.assertEqual(
+            2.0,
+            instance.planner.categorical_signal_strength_max,
         )
         role_scm = {
             role.value: prior for role, prior in instance.planner.role_scm
@@ -210,6 +227,22 @@ class SchemaConfigTests(unittest.TestCase):
                 "unknown option",
             ):
                 load_instance_pipeline_config(path)
+
+    def test_categorical_dirichlet_validation(self) -> None:
+        with self.assertRaises(ValueError):
+            InstancePlannerConfig(categorical_dirichlet_alpha_min=0.0)
+        with self.assertRaises(ValueError):
+            InstancePlannerConfig(
+                categorical_dirichlet_alpha_min=1.0,
+                categorical_dirichlet_alpha_max=0.5,
+            )
+        with self.assertRaises(ValueError):
+            InstancePlannerConfig(categorical_signal_strength_min=0.0)
+        with self.assertRaises(ValueError):
+            InstancePlannerConfig(
+                categorical_signal_strength_min=3.0,
+                categorical_signal_strength_max=1.0,
+            )
 
     def test_nested_config_resolves_paths_from_project_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

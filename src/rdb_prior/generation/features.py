@@ -88,6 +88,16 @@ def generate_table_features(
             cardinality=int(table_plan.parameter_map["categorical_cardinality"]),
             db_start=db_start,
             db_end=db_end,
+            categorical_dirichlet_alpha=float(
+                table_plan.parameter_map.get(
+                    "categorical_dirichlet_alpha", 1.0
+                )
+            ),
+            categorical_signal_strength=float(
+                table_plan.parameter_map.get(
+                    "categorical_signal_strength", 1.0
+                )
+            ),
         )
         values[column.column_id] = _apply_missing(
             encoded,
@@ -339,6 +349,8 @@ def _encode_signal(
     cardinality: int,
     db_start: int,
     db_end: int,
+    categorical_dirichlet_alpha: float,
+    categorical_signal_strength: float,
 ) -> np.ndarray:
     if column.unique:
         order = np.argsort(signal, kind="stable")
@@ -351,13 +363,25 @@ def _encode_signal(
         return signal.astype(np.float64)
     if column.data_type is PhysicalDataType.INTEGER:
         if role is TableRole.LOOKUP:
-            return _quantile_codes(signal, min(cardinality, len(signal)))
+            return _softmax_codes(
+                signal,
+                min(cardinality, len(signal)),
+                rng,
+                dirichlet_alpha=categorical_dirichlet_alpha,
+                signal_strength=categorical_signal_strength,
+            )
         return np.rint(signal * float(rng.uniform(2.0, 20.0))).astype(np.int64)
     if column.data_type is PhysicalDataType.BOOLEAN:
         threshold = float(np.quantile(signal, rng.uniform(0.3, 0.7)))
         return (signal > threshold).astype(np.int8)
     if column.data_type is PhysicalDataType.TEXT:
-        codes = _quantile_codes(signal, min(cardinality, len(signal)))
+        codes = _softmax_codes(
+            signal,
+            min(cardinality, len(signal)),
+            rng,
+            dirichlet_alpha=categorical_dirichlet_alpha,
+            signal_strength=categorical_signal_strength,
+        )
         return np.char.add("v", codes.astype(str))
     if column.data_type is PhysicalDataType.TIMESTAMP:
         return (db_start + signal * 86_400).clip(
@@ -366,15 +390,47 @@ def _encode_signal(
     raise ValueError(f"unsupported physical data type: {column.data_type}")
 
 
-def _quantile_codes(signal: np.ndarray, cardinality: int) -> np.ndarray:
-    cardinality = max(1, cardinality)
+def _softmax_codes(
+    signal: np.ndarray,
+    cardinality: int,
+    rng: np.random.Generator,
+    *,
+    dirichlet_alpha: float,
+    signal_strength: float,
+) -> np.ndarray:
+    """Sample one category id per row from softmax over signal logits.
+
+    score[k] = strength * signal[i] * projection[k] + log(class_prior[k])
+    with class_prior ~ Dirichlet(alpha) and projection ~ N(0, 1). The
+    Gumbel-max trick turns each row's softmax into an argmax over
+    ``logits + gumbel`` noise, vectorized across rows so large tables stay
+    fast. The Dirichlet prior controls class-frequency imbalance (alpha << 1
+    concentrates mass on few classes); the strength controls how strongly the
+    signal drives the category while keeping the causal link intact.
+    """
+    rows = len(signal)
+    if rows == 0:
+        return np.empty(0, dtype=np.int64)
+    cardinality = max(1, min(cardinality, rows))
     if cardinality == 1:
-        return np.zeros(len(signal), dtype=np.int64)
-    boundaries = np.quantile(
-        signal,
-        np.linspace(0, 1, cardinality + 1)[1:-1],
-    )
-    return np.digitize(signal, boundaries).astype(np.int64)
+        return np.zeros(rows, dtype=np.int64)
+
+    class_prior = rng.dirichlet(np.full(cardinality, float(dirichlet_alpha)))
+    log_prior = np.log(np.maximum(class_prior, 1e-12))
+    projection = rng.normal(size=cardinality)
+
+    out = np.empty(rows, dtype=np.int64)
+    step = 2048  # bounds peak memory at ~step * cardinality * 3 float64.
+    for start in range(0, rows, step):
+        stop = min(rows, start + step)
+        block = signal[start:stop]
+        # Clip U into (0, 1) so -log(-log(U)) stays finite.
+        uniform = rng.random((stop - start, cardinality))
+        gumbel = -np.log(-np.log(np.clip(uniform, 1e-12, 1.0 - 1e-12)))
+        logits = signal_strength * block[:, None] * projection[None, :]
+        logits += log_prior[None, :]
+        out[start:stop] = np.argmax(logits + gumbel, axis=1).astype(np.int64)
+    return out
 
 
 def _apply_missing(

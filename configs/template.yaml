@@ -306,6 +306,14 @@ instance:
   categorical_high_cardinality_min: 31
   categorical_high_cardinality_max: 2000
 
+  # <== 分布参数: 类别列 softmax 采样。每张表抽一次:
+  #   dirichlet_alpha 控制类别频次不平衡 (越小越集中于少数类);
+  #   signal_strength 控制信号到类别的因果强度 (越大类别越随信号阈值化)。
+  categorical_dirichlet_alpha_min: 0.1
+  categorical_dirichlet_alpha_max: 1.0
+  categorical_signal_strength_min: 0.5
+  categorical_signal_strength_max: 2.0
+
   # <== 分布参数: 事件时间尺度 (秒)。60 = 1 分钟, 2592000 = 30 天。
   # 语义已收窄为基准时间尺度: TIME_LAGGED 的 lag 幅度与 burst/churn 特征时间;
   # 非滞后路径的间隔由数据库日历区间 + 事件时间机制决定。

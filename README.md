@@ -249,7 +249,8 @@ value/weight lists.
   primary-key name candidates.
 - `instance`: role-conditioned population bounds, shared latent dimension, FK
   affinity, optionality rates, global/role-specific SCM priors, missingness,
-  noise, categorical cardinality, and event-time scales.
+  noise, categorical cardinality and its softmax/Dirichlet sampling bounds, and
+  event-time scales.
 - `instance_generation`: schema selection, deterministic sharding, progress,
   overwrite behavior and project version.
 - `task`: tasks per database, mechanism weights, support/query sizing,
@@ -331,8 +332,11 @@ prior. Root Entity populations are bounded log-normal draws; Lookup sizes are
 log-uniform; Event, Detail, Bridge, and child-Entity populations are
 parent-conditioned log-normal multipliers. Missingness is zero-inflated with
 a Beta-distributed non-zero tail, noise is log-uniform, and categorical
-cardinality contains a small high-cardinality component. Role-specific feature
-widths and role-specific SCM priors prevent large schemas from forcing every
+cardinality contains a small high-cardinality component. Categorical feature
+columns are softmax-sampled per row from the signal logits plus a per-table
+Dirichlet class prior (alpha controls class imbalance, signal strength the
+causal link), so category frequencies are realistically non-uniform. Role-specific
+feature widths and role-specific SCM priors prevent large schemas from forcing every
 table to be unrealistically narrow or causally interchangeable. The bounds
 remain explicit so large 20k-schema runs cannot create unbounded tables.
 
